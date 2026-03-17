@@ -1,0 +1,198 @@
+{
+  "_schema": "pipeline.techniques.v1",
+  "_description": "Cross-run technique registry. Written ONLY after human verdict. Never from automated reviews.",
+  "techniques": [
+    {
+      "technique": "3D CSS transforms / perspective",
+      "css_check": "",
+      "run": "quiz-v3-seismic, quiz-v3-pile-up",
+      "rank": null,
+      "verdict": "acceptable",
+      "model": "various",
+      "date": "2026-05-03",
+      "note": "3D depth consistently rated better than flat layouts"
+    },
+    {
+      "technique": "SVG feTurbulence grain",
+      "css_check": "",
+      "run": "sharecard-v1-monument",
+      "rank": null,
+      "verdict": "acceptable",
+      "model": "various",
+      "date": "2026-05-03",
+      "note": "Subtle grain improves perceived craft quality"
+    },
+    {
+      "technique": "GSAP ScrollTrigger / timeline animation",
+      "css_check": "",
+      "run": "sharecard-v1-all",
+      "rank": null,
+      "verdict": "neutral",
+      "model": "various",
+      "date": "2026-05-03",
+      "note": "Good for animation but doesn't improve static screenshot quality"
+    },
+    {
+      "technique": "Treemap / data viz layout",
+      "css_check": "",
+      "run": "sharecard-v3d-concept-1",
+      "rank": null,
+      "verdict": "acceptable",
+      "model": "various",
+      "date": "2026-05-03",
+      "note": "Novel layout encoding rank in visual structure \u2014 interesting approach"
+    },
+    {
+      "technique": "Centered card on dark background",
+      "css_check": "",
+      "run": "sharecard-v2-all, smoke-test-all",
+      "rank": null,
+      "verdict": "bad",
+      "model": "various",
+      "date": "2026-05-03",
+      "note": "Default AI slop pattern. Every centered dark card was rated bad."
+    },
+    {
+      "technique": "Gold gradient + dark background",
+      "css_check": "",
+      "run": "sharecard-v1-all",
+      "rank": null,
+      "verdict": "bad",
+      "model": "various",
+      "date": "2026-05-03",
+      "note": "All 3 V1 concepts converged on this. Looks generic and AI-generated."
+    },
+    {
+      "technique": "Vintage fight card / boxing poster",
+      "css_check": "",
+      "run": "sharecard-v3c",
+      "rank": null,
+      "verdict": "banned",
+      "model": "various",
+      "date": "2026-05-03",
+      "note": "All 3 designers independently chose this. Banned aesthetic."
+    },
+    {
+      "technique": "Spotify Wrapped layout",
+      "css_check": "",
+      "run": "sharecard-v3b",
+      "rank": null,
+      "verdict": "banned",
+      "model": "various",
+      "date": "2026-05-03",
+      "note": "Moodboard contaminated builders. Banned reference."
+    },
+    {
+      "technique": "Cream/newsprint background",
+      "css_check": "",
+      "run": "sharecard-v3c",
+      "rank": null,
+      "verdict": "banned",
+      "model": "various",
+      "date": "2026-05-03",
+      "note": "Part of the fight card convergence. Banned aesthetic."
+    },
+    {
+      "technique": "Kinetic typography / glitch text",
+      "css_check": "",
+      "run": "quiz-v3-bleed-through",
+      "rank": null,
+      "verdict": "acceptable",
+      "model": "various",
+      "date": "2026-05-03",
+      "note": "Strong when combined with depth. Weak alone."
+    },
+    {
+      "technique": "Horizontal bar chart / signal meter",
+      "css_check": "",
+      "run": "sharecard-v3h-concept-1",
+      "rank": null,
+      "verdict": "acceptable",
+      "model": "various",
+      "date": "2026-05-03",
+      "note": "Data viz encoding rank as bar length \u2014 novel, GPT-5.4 winner."
+    }
+  ],
+  "verdicts": [
+    {
+      "run": "sharecard-v1",
+      "decision": "reject",
+      "feedback": "All 3 concepts visually identical \u2014 gold/dark convergence. No diversity despite different approach docs.",
+      "date": "2026-05-03"
+    },
+    {
+      "run": "sharecard-v2",
+      "decision": "reject",
+      "feedback": "V2 is worse than V1. Quality didn't improve. Pressure Print broken.",
+      "date": "2026-05-03"
+    },
+    {
+      "run": "smoke-test-1",
+      "decision": "reject",
+      "feedback": "Builder 1 built Designer 0's concept due to race condition (missing approach doc). All builds used same fonts/colors.",
+      "date": "2026-05-03"
+    },
+    {
+      "run": "sharecard-v3b",
+      "decision": "reject",
+      "feedback": "Brief drift \u2014 moodboard of Spotify Wrapped caused builders to make music recaps instead of sneaker sharecards. Content mismatch.",
+      "date": "2026-05-03"
+    },
+    {
+      "run": "sharecard-v3c",
+      "decision": "reject",
+      "feedback": "All 3 designers chose vintage boxing fight card concept. Conceptual convergence not caught by gate (gate only checked fonts/colors mechanically).",
+      "date": "2026-05-03"
+    },
+    {
+      "run": "sharecard-v3d",
+      "decision": "iterate",
+      "feedback": "Concepts functional but research phase was performative \u2014 moodboard was aggregator thumbnails, not real designs. Concept 1 treemap interesting.",
+      "date": "2026-05-03"
+    },
+    {
+      "run": "sharecard-v3e",
+      "decision": "reject",
+      "feedback": "Designers burned all Hermes turns on mandatory browser research. Approach docs never written. Research succeeded with Refero but designers failed.",
+      "date": "2026-05-03"
+    },
+    {
+      "run": "sharecard-v3f",
+      "decision": "iterate",
+      "feedback": "All 3 built successfully. Concept 0 (Opus) best. But builds feel flat \u2014 approach docs are rich and creative but output doesn't translate the energy.",
+      "date": "2026-05-03"
+    }
+  ],
+  "learnings": [
+    {
+      "run": "calibration-session",
+      "feedback": "0 great, 6 acceptable, 9 bad. Creative ambition > polish. AI slop = instant fail.",
+      "decision": "calibration",
+      "date": "2026-05-01"
+    },
+    {
+      "run": "sharecard-v3b",
+      "feedback": "Moodboard visual content overwhelms brief text. Content fidelity must be enforced at both designer and builder level.",
+      "decision": "reject",
+      "date": "2026-05-02"
+    },
+    {
+      "run": "sharecard-v3c",
+      "feedback": "LLMs converge on the same aesthetic local optimum. Gate must check conceptual convergence, not just fonts/colors.",
+      "decision": "reject",
+      "date": "2026-05-02"
+    },
+    {
+      "run": "sharecard-v3e",
+      "feedback": "Designers should NOT do browser research. It burns all Hermes turns. Research node does the research, designers just design.",
+      "decision": "reject",
+      "date": "2026-05-02"
+    },
+    {
+      "run": "sharecard-v3f-v3h",
+      "feedback": "Approach docs are rich and creative (25KB) but builders only saw 3KB. Full creative narrative must reach the builder.",
+      "decision": "iterate",
+      "date": "2026-05-03"
+    }
+  ]
+}
