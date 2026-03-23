@@ -23,6 +23,7 @@ Drop-in code snippets for common creative web patterns. Each recipe is a self-co
 8. [Image Parallax on Scroll](#parallax)
 9. [Staggered Grid Entrance](#staggered-grid)
 10. [Horizontal Scroll Section](#horizontal-scroll)
+11. [Native View Transitions](#view-transitions)
 
 ---
 
@@ -639,3 +640,189 @@ export function HorizontalScroll({ children, className }: { children: React.Reac
 - Add velocity-based skew: items lean in the scroll direction for a physics feel
 - Include a progress indicator (dots or a bar) so users know where they are
 - Consider disabling on mobile and using a native horizontal scroll instead
+
+---
+
+## 11. Native View Transitions {#view-transitions}
+
+**What it does:** Uses the native CSS View Transitions API to create smooth, native-feeling transitions between DOM states. The browser automatically captures "before" and "after" snapshots and morphs between them.
+
+**Strengths:**
+- **Zero dependencies** — pure browser API, no animation libraries needed
+- **Performance** — runs on the compositor thread, hardware-accelerated
+- **Automatic intelligent interpolation** — browser figures out how elements should morph
+- **Accessible** — respects `prefers-reduced-motion` automatically
+- **Progressively enhanced** — gracefully falls back to instant state changes
+- **Shared element transitions** — elements can seamlessly morph between screens
+
+**Use when:**
+- Navigation between pages/routes (especially single-page app route changes)
+- Modal/dialog open/close with shared elements
+- Grid-to-detail page transitions (like photo galleries → lightbox)
+- Theme switching, layout mode toggles
+- Quiz/form step transitions where UI elements morph between states
+- Any state change where you can identify "before" and "after" elements
+
+**Don't use when:**
+- Complex continuous animations (stick with GSAP/Framer Motion)
+- IE or older browser support is critical (progressive enhancement handles this)
+- Animations need precise timing control or complex choreography
+
+**Dependencies:** None (native browser API)
+
+```tsx
+"use client";
+import { useEffect, useState } from "react";
+
+// Browser support check
+const supportsViewTransitions = typeof window !== "undefined" && "startViewTransition" in document;
+
+export function ViewTransitionDemo() {
+  const [currentView, setCurrentView] = useState<"grid" | "detail">("grid");
+  const [selectedItem, setSelectedItem] = useState<number | null>(null);
+
+  const handleTransition = (newView: "grid" | "detail", itemId?: number) => {
+    if (!supportsViewTransitions) {
+      // Fallback: instant state change
+      setCurrentView(newView);
+      if (itemId !== undefined) setSelectedItem(itemId);
+      return;
+    }
+
+    // Native view transition
+    document.startViewTransition(() => {
+      setCurrentView(newView);
+      if (itemId !== undefined) setSelectedItem(itemId);
+    });
+  };
+
+  if (currentView === "detail" && selectedItem !== null) {
+    return (
+      <DetailView 
+        item={selectedItem} 
+        onBack={() => handleTransition("grid")}
+      />
+    );
+  }
+
+  return (
+    <GridView 
+      onItemClick={(itemId) => handleTransition("detail", itemId)}
+    />
+  );
+}
+
+function GridView({ onItemClick }: { onItemClick: (id: number) => void }) {
+  const items = [1, 2, 3, 4, 5, 6];
+
+  return (
+    <div className="grid grid-cols-3 gap-4 p-8">
+      {items.map((item) => (
+        <div 
+          key={item}
+          onClick={() => onItemClick(item)}
+          // 🔥 This is the magic: view-transition-name creates shared element
+          style={{ viewTransitionName: `item-${item}` }}
+          className="aspect-square bg-gradient-to-br from-purple-400 to-pink-600 
+                     rounded-xl cursor-pointer hover:scale-105 transition-transform
+                     flex items-center justify-center text-white font-bold text-xl"
+        >
+          {item}
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function DetailView({ item, onBack }: { item: number; onBack: () => void }) {
+  return (
+    <div className="p-8 min-h-screen flex flex-col">
+      <button 
+        onClick={onBack}
+        className="mb-8 px-4 py-2 bg-gray-200 rounded-lg hover:bg-gray-300"
+      >
+        ← Back to Grid
+      </button>
+      
+      <div 
+        // Same view-transition-name = shared element transition
+        style={{ viewTransitionName: `item-${item}` }}
+        className="w-full max-w-md mx-auto aspect-square 
+                   bg-gradient-to-br from-purple-400 to-pink-600 rounded-xl
+                   flex items-center justify-center text-white font-bold text-6xl"
+      >
+        {item}
+      </div>
+      
+      <div className="mt-8 text-center">
+        <h1 className="text-3xl font-bold mb-4">Item {item}</h1>
+        <p className="text-gray-600">
+          This element smoothly transitioned from the grid using native View Transitions.
+          Notice how the element morphed its size and position automatically.
+        </p>
+      </div>
+    </div>
+  );
+}
+```
+
+**Advanced: Custom transition animations with CSS**
+
+```css
+/* Custom timing and easing */
+::view-transition-old(item-*),
+::view-transition-new(item-*) {
+  animation-duration: 0.5s;
+  animation-timing-function: cubic-bezier(0.4, 0.0, 0.2, 1);
+}
+
+/* Custom animation for specific named transitions */
+::view-transition-old(modal) {
+  animation: fade-out 0.3s ease-out;
+}
+
+::view-transition-new(modal) {
+  animation: slide-up 0.3s ease-out;
+}
+
+@keyframes fade-out {
+  from { opacity: 1; }
+  to { opacity: 0; }
+}
+
+@keyframes slide-up {
+  from { 
+    opacity: 0;
+    transform: translateY(20px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+/* Disable transitions for users who prefer reduced motion */
+@media (prefers-reduced-motion: reduce) {
+  ::view-transition-group(*),
+  ::view-transition-old(*),
+  ::view-transition-new(*) {
+    animation-duration: 0.01ms !important;
+  }
+}
+```
+
+**Real-world use cases:**
+- **Photo gallery**: Grid thumbnail → full-size detail with perfect morphing
+- **Product catalog**: List view → product detail with shared product image
+- **Navigation**: Button → full-screen menu with morphing shape
+- **Quiz steps**: Question morphs into next question, progress bar animates
+- **Theme toggle**: Elements smoothly recolor and reposition
+
+**Browser support:** Chrome 111+, Edge 111+, Safari 18+, Firefox (partial). Always include the `supportsViewTransitions` check for progressive enhancement.
+
+**Tuning tips:**
+- Use meaningful `view-transition-name` values (`product-123`, `nav-menu`) not generic ones
+- Elements with same `view-transition-name` will morph between states — this is the key
+- Keep transitions under 500ms for snappy feel
+- Test with `prefers-reduced-motion` users
+- Combine with React Router or Next.js navigation for seamless page transitions
