@@ -623,6 +623,163 @@ void main() {
 }
 ```
 
+### Curved 3D Product Grids with Holographic Effects
+*Source: [Codrops - From Flat to Spatial](https://tympanus.net/codrops/2026/02/24/from-flat-to-spatial-creating-a-3d-product-grid-with-react-three-fiber/) (Feb 2026)*
+
+Advanced R3F patterns for immersive e-commerce experiences: curved grid layouts, topographic GLSL backgrounds, holographic selection states, and performance-optimized state architecture.
+
+**Key Architectural Pattern:**
+```tsx
+// CRITICAL: Separate React state from 60fps animation values
+// React state = discrete user actions (selection, filters)
+// Mutable refs = continuous animation values (position, opacity, uniforms)
+
+const CONFIG = {
+  gridCols: 8,
+  itemSize: 2.5,
+  gap: 0.4,
+  curvatureStrength: 0.06, // Amount of Z-axis curve
+  dampFactor: 0.2,
+  tiltFactor: 0.08,
+};
+
+function CurvedGrid({ items, selectedId }) {
+  const rigState = useRef({ 
+    targetX: 0, 
+    targetY: 0, 
+    currentX: 0, 
+    currentY: 0 
+  });
+
+  useFrame(() => {
+    // 60fps camera damping - never put this in React state
+    rigState.current.currentX = THREE.MathUtils.lerp(
+      rigState.current.currentX, 
+      rigState.current.targetX, 
+      CONFIG.dampFactor
+    );
+  });
+
+  return items.map((item, idx) => (
+    <GridTile 
+      key={item.id}
+      position={calculateCurvedPosition(idx)}
+      selected={item.id === selectedId}
+      rigState={rigState}
+    />
+  ));
+}
+
+// Curved grid positioning algorithm
+function calculateCurvedPosition(index) {
+  const col = index % CONFIG.gridCols;
+  const row = Math.floor(index / CONFIG.gridCols);
+  
+  const x = col * (CONFIG.itemSize + CONFIG.gap) - gridWidth / 2;
+  const y = -(row * (CONFIG.itemSize + CONFIG.gap)) + gridHeight / 2;
+  
+  // Apply curvature - creates bowl/dome effect
+  const distFromCenter = Math.sqrt(x * x + y * y);
+  const z = -Math.pow(distFromCenter * CONFIG.curvatureStrength, 2);
+  
+  return [x, y, z];
+}
+```
+
+**Holographic Selection Shader:**
+```glsl
+// Iridescent rainbow effect for selected cards
+uniform float uSelected; // 0.0 → 1.0
+uniform float uTime;
+varying vec2 vUv;
+varying vec3 vNormal;
+
+void main() {
+  // Base gradient
+  vec3 color1 = vec3(1.0, 0.1, 0.8); // magenta
+  vec3 color2 = vec3(0.1, 0.8, 1.0); // cyan
+  vec3 color3 = vec3(0.8, 1.0, 0.1); // lime
+  
+  // Animated iridescent shift
+  float shift = sin(uTime * 2.0 + vUv.x * 10.0) * 0.5 + 0.5;
+  vec3 rainbow = mix(mix(color1, color2, shift), color3, vUv.y);
+  
+  // Apply selection state
+  vec3 finalColor = mix(vec3(1.0), rainbow, uSelected);
+  
+  // Fresnel-based edge glow
+  float fresnel = pow(1.0 - dot(vNormal, vec3(0.0, 0.0, 1.0)), 2.0);
+  finalColor += fresnel * uSelected * 0.5;
+  
+  gl_FragColor = vec4(finalColor, 1.0);
+}
+```
+
+**Performance Rules:**
+1. **Never put 60fps values in React state** - kills performance via reconciliation overhead
+2. **Use Leva debug controls** for all CONFIG values during development 
+3. **Cull distant objects** - hide tiles beyond `cullDistance` from camera
+4. **Batch uniform updates** - update shader uniforms once per frame, not per tile
+
+### Modern GLSL Development with glslify
+*Source: [Codrops - Curved 3D Grids](https://tympanus.net/codrops/2026/02/24/from-flat-to-spatial-creating-a-3d-product-grid-with-react-three-fiber/)*
+
+Modern shader development workflow using glslify + webpack for modular GLSL:
+
+**next.config.mjs setup:**
+```js
+/** @type {import('next').NextConfig} */
+const nextConfig = {
+  webpack: (config) => {
+    config.module.rules.push({
+      test: /\.(glsl|vs|fs|vert|frag)$/,
+      exclude: /node_modules/,
+      use: ['raw-loader', 'glslify-loader']
+    });
+    return config;
+  }
+};
+
+export default nextConfig;
+```
+
+**Modular shader imports:**
+```glsl
+// shaders/topographic.frag
+#pragma glslify: snoise = require('glsl-noise/simplex/2d')
+#pragma glslify: fbm = require('./utils/fbm.glsl')
+
+uniform float uTime;
+uniform vec2 uResolution;
+varying vec2 vUv;
+
+void main() {
+  // Layered noise for topographic effect
+  float elevation = fbm(vUv * 8.0 + uTime * 0.1);
+  
+  // Contour lines
+  float lines = abs(sin(elevation * 50.0)) < 0.1 ? 1.0 : 0.0;
+  
+  vec3 color = mix(vec3(0.1, 0.2, 0.4), vec3(0.8, 0.9, 1.0), elevation);
+  color += lines * 0.3;
+  
+  gl_FragColor = vec4(color, 1.0);
+}
+```
+
+```tsx
+// Import as ES module
+import topographicFrag from './shaders/topographic.frag';
+
+const material = new THREE.ShaderMaterial({
+  fragmentShader: topographicFrag,
+  uniforms: {
+    uTime: { value: 0 },
+    uResolution: { value: [window.innerWidth, window.innerHeight] }
+  }
+});
+```
+
 ### Multi-Page WebGL with Barba.js
 *Source: [Codrops - Scroll-Revealed WebGL Gallery](https://tympanus.net/codrops/2026/02/02/building-a-scroll-revealed-webgl-gallery-with-gsap-three-js-astro-and-barba-js/)*
 
