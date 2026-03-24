@@ -550,6 +550,42 @@ Start with CSS/DOM for layout, then seamlessly upgrade to WebGL for performance:
 4. Fade out DOM, fade in WebGL with identical positioning
 5. Now you have GPU-accelerated version with shader effects
 
+### WebGPU Production Ready (2026)
+*Source: [Three.js 2026 Update](https://www.utsubo.com/blog/threejs-2026-what-changed)*
+
+WebGPU is now production-ready across all major browsers (including Safari iOS as of Sept 2025). Three.js r171+ provides zero-config WebGPU support with significant performance improvements over WebGL.
+
+**Quick Migration:**
+```tsx
+// Old: WebGL renderer  
+import { WebGLRenderer } from 'three';
+
+// New: WebGPU renderer (with WebGL2 fallback)
+import { WebGPURenderer } from 'three/webgpu';
+
+const renderer = new WebGPURenderer();
+// Automatic fallback to WebGL2 on older browsers
+```
+
+**Key Benefits:**
+- **~100x performance improvement** for compute-heavy applications (particles, physics)
+- **Compute shaders** — run ML models directly on GPU in browser
+- **Better multi-threading** — less main thread blocking
+- **Modern GPU optimizations** — especially on mobile devices
+
+**Best Use Cases:**
+- Large particle systems (1M+ particles)
+- Real-time data visualization with millions of points
+- GPU-accelerated physics simulations
+- AI/ML model inference (via compute shaders)
+- Multi-scene composite rendering
+
+**Browser Support (2026):**
+- Chrome/Edge: Full support since 2024
+- Firefox: Full support since early 2025  
+- Safari: Desktop + iOS support since Sept 2025
+- Three.js handles fallback automatically
+
 ### Hand Gesture Particle Control
 *Source: Reddit - MediaPipe + Particle Simulation*
 
