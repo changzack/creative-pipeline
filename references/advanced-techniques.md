@@ -11,6 +11,8 @@ Deeper techniques for when you need to push beyond standard animation libraries.
 5. [Generative/Procedural Art](#generative)
 6. [Advanced GSAP Techniques](#advanced-gsap)
 7. [Performance Optimization](#performance)
+8. [Emerging Techniques (2026)](#emerging-2026) — WebGPU, TSL, fluid X-ray, native scroll animations
+9. [TSL Migration Guide: GLSL → TSL](#tsl-migration)
 
 ---
 
@@ -789,6 +791,220 @@ Persistent WebGL canvas across page transitions using Barba.js:
 - Page-specific scenes load/unload dynamically
 - Smooth transitions between different page layouts
 - Scroll triggers work seamlessly with page transitions
+
+### Dual-Scene Fluid X-Ray Reveal (WebGPU + TSL)
+*Source: [Codrops - Dual-Scene Fluid X-Ray Reveal](https://tympanus.net/codrops/2026/03/23/dual-scene-fluid-x-ray-reveal-effect/) (Mar 23, 2026)*
+
+**This is the new frontier.** TSL (Three.js Shading Language) replaces GLSL for shader authoring in WebGPU mode. This tutorial demonstrates rendering two complete 3D scenes and using a real-time Navier-Stokes fluid simulation as a mask between them — something impossible with standard postprocessing.
+
+**Why this matters:**
+- TSL is JavaScript-native shader authoring (no GLSL string templates)
+- Fluid sim runs as a WebGPU compute shader (not on CPU)
+- Two full scenes rendered simultaneously with fluid-driven masking
+- Performance: compute shaders handle physics that would tank a CPU implementation
+
+**TSL Shader Authoring Pattern:**
+```tsx
+import { tslFn, uniform, texture, uv, vec4, float } from 'three/tsl';
+
+// TSL replaces GLSL strings with composable JS functions
+const fluidMaskShader = tslFn(({ sceneA, sceneB, fluidMask }) => {
+  const uvCoord = uv();
+  const colorA = texture(sceneA, uvCoord);
+  const colorB = texture(sceneB, uvCoord);
+  const mask = texture(fluidMask, uvCoord).r;
+  
+  // Fluid simulation drives the reveal
+  return vec4(
+    colorA.rgb.mul(float(1.0).sub(mask)).add(colorB.rgb.mul(mask)),
+    float(1.0)
+  );
+});
+
+// Use with WebGPURenderer
+import { WebGPURenderer } from 'three/webgpu';
+const renderer = new WebGPURenderer();
+```
+
+**Compute Shader for Fluid Simulation:**
+```tsx
+import { compute, storageTexture, textureStore } from 'three/tsl';
+
+// Navier-Stokes fluid sim running entirely on GPU
+const fluidCompute = compute(({ velocityField, pressureField, mousePos }) => {
+  // Advection, diffusion, pressure solve — all in compute shaders
+  // Mouse/touch input drives the fluid
+  // Output: density texture used as scene mask
+});
+
+// Run compute pass before render
+renderer.computeAsync(fluidCompute);
+```
+
+**Use Cases:**
+- X-ray/reveal effects between any two scenes
+- Liquid transitions driven by user touch/mouse
+- Smoke/fire masking between different visual states
+- Any effect where you need physics-based masking
+
+**Key Insight:** This pattern generalizes — any GPU compute simulation (fluid, particles, cloth) can drive visual transitions between scenes. The compute shader is the creative lever.
+
+### Chrome 146: Native Scroll-Triggered Animations (CSS-only)
+*Source: CSS-Tricks, Chrome 146 release (Mar 13, 2026)*
+
+Browser-native scroll animations without JavaScript. Uses `animation-timeline: scroll()` and `animation-range`:
+
+```css
+/* CSS-only scroll-triggered fade + slide */
+.reveal-element {
+  animation: revealUp linear both;
+  animation-timeline: view();
+  animation-range: entry 0% entry 100%;
+}
+
+@keyframes revealUp {
+  from {
+    opacity: 0;
+    transform: translateY(60px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+/* Scroll-linked progress bar */
+.progress-bar {
+  animation: growWidth linear both;
+  animation-timeline: scroll(root);
+}
+
+@keyframes growWidth {
+  from { transform: scaleX(0); }
+  to { transform: scaleX(1); }
+}
+```
+
+**When to use native vs GSAP ScrollTrigger:**
+| Feature | CSS Scroll Animations | GSAP ScrollTrigger |
+|---|---|---|
+| Simple reveal animations | ✅ Best choice | Overkill |
+| Complex timelines | ❌ Limited | ✅ Best choice |
+| Pinning sections | ❌ Not supported | ✅ Built-in |
+| Scrub-linked animations | ⚠️ Basic only | ✅ Full control |
+| Performance | ✅ Compositor thread | ⚠️ Main thread |
+| Browser support (2026) | Chrome/Edge/Safari | Universal |
+| Custom easing + callbacks | ❌ No | ✅ Full |
+
+**Recommendation:** Use native CSS for simple reveal-on-scroll patterns (parallax, fade-in, slide-up). Use GSAP for anything involving pinning, complex timelines, scrubbing, or callbacks. They can coexist.
+
+### SVG Mask Scroll Transitions
+*Source: [Codrops - SVG Mask Scroll Transitions](https://tympanus.net/codrops/2026/03/11/) (Mar 11, 2026)*
+
+Complex image reveals using GSAP + ScrollTrigger + animated SVG clip-paths:
+
+```tsx
+// SVG mask that morphs on scroll
+const maskPath = useRef<SVGPathElement>(null);
+
+useEffect(() => {
+  gsap.to(maskPath.current, {
+    attr: {
+      d: "M0,0 L1440,0 L1440,900 L0,900 Z" // full reveal
+    },
+    ease: "power3.inOut",
+    scrollTrigger: {
+      trigger: ".reveal-section",
+      start: "top center",
+      end: "bottom center",
+      scrub: 1,
+    }
+  });
+}, []);
+
+// In JSX
+<svg viewBox="0 0 1440 900">
+  <defs>
+    <clipPath id="reveal-mask">
+      <path ref={maskPath} d="M720,450 L720,450 L720,450 L720,450 Z" />
+    </clipPath>
+  </defs>
+</svg>
+<div style={{ clipPath: "url(#reveal-mask)" }}>
+  {/* Content revealed by the morphing SVG path */}
+</div>
+```
+
+**Advantage over `clip-path` CSS:** SVG paths can be any shape — circles, blobs, organic forms, text outlines — not just basic rectangles/circles/polygons.
+
+---
+
+## TSL Migration Guide: GLSL → TSL {#tsl-migration}
+
+TSL (Three.js Shading Language) is the future of shader authoring in Three.js. It replaces GLSL strings with composable JavaScript functions that work with both WebGPU and WebGL2.
+
+### Why Migrate
+
+1. **No more GLSL strings** — type-safe, composable, debuggable
+2. **Cross-renderer** — same shader code works on WebGPU and WebGL2
+3. **Compute shaders** — only available through TSL/WebGPU
+4. **Better DX** — IDE autocomplete, imports, tree-shaking
+
+### Quick Translation Guide
+
+| GLSL | TSL |
+|---|---|
+| `uniform float uTime` | `const uTime = uniform(float(0))` |
+| `varying vec2 vUv` | `uv()` (built-in) |
+| `texture2D(tex, uv)` | `texture(tex, uv())` |
+| `mix(a, b, t)` | `a.mix(b, t)` or `mix(a, b, t)` |
+| `smoothstep(e0, e1, x)` | `smoothstep(e0, e1, x)` |
+| `gl_FragColor = vec4(...)` | `return vec4(...)` |
+| Custom function | `tslFn(({ inputs }) => { ... })` |
+
+### Example: Noise Color Flow (GLSL → TSL)
+
+**Before (GLSL):**
+```glsl
+uniform float uTime;
+varying vec2 vUv;
+
+void main() {
+  float n = snoise(vec3(vUv * 3.0, uTime * 0.2));
+  vec3 color = mix(vec3(0.1, 0.0, 0.3), vec3(0.0, 0.3, 0.8), n);
+  gl_FragColor = vec4(color, 1.0);
+}
+```
+
+**After (TSL):**
+```tsx
+import { tslFn, uniform, uv, vec3, float, mx_noise_vec3 } from 'three/tsl';
+
+const uTime = uniform(float(0));
+
+const noiseFlow = tslFn(() => {
+  const uvCoord = uv().mul(3.0);
+  const n = mx_noise_vec3(vec3(uvCoord, uTime.mul(0.2)));
+  const color1 = vec3(0.1, 0.0, 0.3);
+  const color2 = vec3(0.0, 0.3, 0.8);
+  return vec4(color1.mix(color2, n.x), float(1.0));
+});
+```
+
+### When to Use TSL vs GLSL
+
+- **New projects targeting modern browsers** → TSL
+- **Existing GLSL shaders that work fine** → keep GLSL (Three.js still supports it)
+- **Need compute shaders** → TSL (only option)
+- **Need Shadertoy-style experimentation** → GLSL (more examples/resources available)
+- **Production prototypes for 2026+** → TSL preferred
+
+### Resources
+- [Three.js TSL Documentation](https://threejs.org/docs/#api/en/nodes/core/Node)
+- [Three.js TSL Examples](https://threejs.org/examples/?q=tsl)
+- [Codrops Dual-Scene Fluid Tutorial](https://tympanus.net/codrops/2026/03/23/dual-scene-fluid-x-ray-reveal-effect/) — production TSL example
+
+---
 
 **Monitor these resources for cutting-edge techniques:**
 - [Codrops](https://tympanus.net/codrops/) — monthly advanced tutorials
