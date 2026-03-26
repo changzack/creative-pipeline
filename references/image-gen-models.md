@@ -8,7 +8,7 @@
 
 | Creative Task | Best Model | Why | Cost/image |
 |---|---|---|---|
-| **Character illustration (hand-drawn style)** | Nano Banana 2 | Reasoning-guided composition, character consistency for up to 5 characters without fine-tuning | $0.08 (1K) |
+| **Character illustration (hand-drawn style)** | Uni-1 ⏳ / Nano Banana 2 ✅ | Uni-1: autoregressive reasoning, #1 Elo for style/editing + reference gen. Nano Banana 2: available now, good character consistency | Uni-1: $0.09 (2K) / NB2: $0.08 (1K) |
 | **Photorealistic hero shots** | FLUX.2 [pro] | Zero-config, studio-grade, best prompt adherence | $0.03/MP |
 | **Text in images (logos, posters)** | Recraft V3 or Ideogram V3 | Purpose-built for accurate text rendering | $0.04-$0.09 |
 | **Vector art / icons** | Recraft V3 | Only model with native vector output | $0.08 (vector) |
@@ -20,6 +20,20 @@
 | **Campaign consistency (same character, many scenes)** | Nano Banana 2 | Built-in multi-reference (up to 14 images), character lock for 5 people | $0.08 (1K) |
 
 ## Model Profiles
+
+### Tier 0: Next-Gen (API Waitlist)
+
+#### Luma Uni-1 (Luma Labs) ⏳
+- **Endpoint**: API rolling out — waitlisted as zack@complex.com (submitted 2026-03-25)
+- **Architecture**: Autoregressive transformer (NOT diffusion). Text + images in ONE token sequence. Reasons about composition/constraints BEFORE rendering.
+- **Superpower**: #1 Elo in overall quality, style/editing, and reference-based generation. Beats Nano Banana 2 on spatial reasoning (0.58 vs 0.47) and logical reasoning (0.32 vs NB2's equivalent). Multi-ref with up to 8 input images.
+- **Pricing**: $0.09/image at 2K (text-to-image), $0.093 (edit/i2i), $0.11 (8-ref multi-ref). 10-30% cheaper than Nano Banana at 2K.
+- **Best for**: Production archetype illustrations, multi-reference batch generation with style lock, complex multi-constraint prompts, iterative editing without style drift.
+- **Why it matters for our pipeline**: Solves the "reasoning about what to draw" problem. Where Nano Banana pattern-matches from the prompt, Uni-1 decomposes instructions, plans composition, and reasons about spatial relationships. This is exactly the gap that causes "wrong hand, missing accessory, broken composition" errors.
+- **Weakness**: No API yet. Benchmarks are self-reported (no independent verification yet). Slower than diffusion at low res (autoregressive = sequential token generation).
+- **Enterprise users**: Adidas, Mazda, Publicis Groupe, Serviceplan
+- **Status**: Free trial at lumalabs.ai (browser-only). API waitlisted. Will A/B against Nano Banana 2 when API opens.
+- **Roadmap**: Audio and video extensions planned (same unified architecture).
 
 ### Tier 1: Primary Creative Models
 
