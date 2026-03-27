@@ -1,8 +1,9 @@
 # Image Generation Model Intelligence
 
 > Which model to reach for based on the creative task.
-> Updated: 2026-03-25
-> Platform: fal.ai (single API, pay-per-use)
+> Updated: 2026-03-27
+> Platform: fal.ai (PRIMARY — single API, pay-per-use)
+> API Key: verified working (saved in TOOLS.md)
 
 ## Quick Decision Matrix
 
@@ -141,6 +142,18 @@ Image gen models handle: static illustrations, background textures, character ar
 | LoRA training (if needed) | 1 training run | FLUX LoRA fast | ~$2-5 |
 | Exploration / drafts | 100 images | FLUX.1 [schnell] | ~$0.30 |
 
+## Ranking Experiences — Asset Routing
+
+| Asset Type | Model | Rationale |
+|---|---|---|
+| **Badge icons** (Against the Grain, Speed Demon, etc.) | Recraft V3 | Clean vector-quality design assets |
+| **VS divider / stamps** (winner, champion) | Recraft V3 | Sharp editorial graphics with text |
+| **Background textures** (linen, concrete, paper grain) | FLUX.1 [schnell] | Fast + cheap, texture doesn't need reasoning |
+| **Mystery overlays / dramatic reveals** | FLUX.2 [pro] | Photorealistic dark textures with depth |
+| **Heat map / spectrum visuals** | FLUX.1 [schnell] | Abstract gradients, fast iteration |
+| **Album cover fallbacks** | FLUX.2 [pro] | Realistic representation |
+| **Editorial illustrations** (crown, trophy, flame/diamond icons) | Recraft V3 | Monochrome editorial print style, vector |
+
 ## Testing Log
 
 > Document results here as we test models against specific creative tasks.
@@ -151,8 +164,8 @@ _(No entries yet — testing begins when fal.ai API key is configured)_
 ## API Setup
 
 ```bash
-# Set fal.ai API key
-export FAL_KEY="your-key-here"
+# Set fal.ai API key (verified 2026-03-27)
+export FAL_KEY="b93c5940-0082-405b-9684-c1fed78c009f:957b94e1bb6636f8c7a19b01d96cacbd"
 
 # Test generation (Node.js)
 npm install @fal-ai/client
