@@ -552,41 +552,93 @@ Start with CSS/DOM for layout, then seamlessly upgrade to WebGL for performance:
 4. Fade out DOM, fade in WebGL with identical positioning
 5. Now you have GPU-accelerated version with shader effects
 
-### WebGPU Production Ready (2026)
-*Source: [Three.js 2026 Update](https://www.utsubo.com/blog/threejs-2026-what-changed)*
+### WebGPU Production Ready (2026) — Universal Browser Support
+*Source: [Three.js 2026: What Changed](https://www.utsubo.com/blog/threejs-2026-what-changed)*
 
-WebGPU is now production-ready across all major browsers (including Safari iOS as of Sept 2025). Three.js r171+ provides zero-config WebGPU support with significant performance improvements over WebGL.
+**Major milestone:** WebGPU achieved universal browser support in Sept 2025 when Apple shipped Safari 26 with full WebGPU on macOS, iOS, iPadOS, and visionOS. The "waiting game is over" — you can now ship WebGPU applications expecting them to work for every user.
 
-**Quick Migration:**
+**Three.js r171+ provides zero-config WebGPU:**
 ```tsx
-// Old: WebGL renderer  
-import { WebGLRenderer } from 'three';
-
-// New: WebGPU renderer (with WebGL2 fallback)
+// Zero-config import — automatic fallback handling
 import { WebGPURenderer } from 'three/webgpu';
 
 const renderer = new WebGPURenderer();
-// Automatic fallback to WebGL2 on older browsers
+// Automatically falls back to WebGL2 if WebGPU unavailable
 ```
 
-**Key Benefits:**
-- **~100x performance improvement** for compute-heavy applications (particles, physics)
-- **Compute shaders** — run ML models directly on GPU in browser
-- **Better multi-threading** — less main thread blocking
-- **Modern GPU optimizations** — especially on mobile devices
+**Real-world performance data:**
+- **100x performance improvement** documented for million-particle systems vs WebGL
+- NPM downloads hit 2.7M/week (270x more than Babylon.js) — ecosystem dominance
+- Powers rich applications processing millions of data points in real-time
+- Physical installations use Three.js now (1M+ particle interactive artworks)
 
-**Best Use Cases:**
-- Large particle systems (1M+ particles)
-- Real-time data visualization with millions of points
-- GPU-accelerated physics simulations
-- AI/ML model inference (via compute shaders)
-- Multi-scene composite rendering
+**Key WebGPU advantages over WebGL:**
+- **Compute shaders** — general-purpose GPU computations (physics, ML inference, data processing)
+- **Explicit GPU memory control** — better resource management
+- **Modern API design** — built for contemporary GPU architectures
+- **Reduced CPU overhead** — less main thread blocking
 
-**Browser Support (2026):**
-- Chrome/Edge: Full support since 2024
-- Firefox: Full support since early 2025  
-- Safari: Desktop + iOS support since Sept 2025
-- Three.js handles fallback automatically
+**Deployment reality check (March 2026):**
+- **Chrome/Edge:** Full support since v113 (2023)
+- **Firefox:** Windows support since v141, macOS ARM since v145
+- **Safari:** Full support (all platforms) since v26 (Sept 2025)
+- **Market reality:** Can now deploy WebGPU-first with confidence
+
+**Migration strategy:**
+Start projects with WebGPU by default. Three.js handles fallback automatically. The performance ceiling is dramatically higher, and the browser support floor is now solid.
+
+### CSS Scroll-Driven Corner-Shape Animations  
+*Source: [CSS-Tricks - Scroll-Driven corner-shape Animations](https://css-tricks.com/experimenting-with-scroll-driven-corner-shape-animations/)*
+
+New CSS `corner-shape` property enables animatable corners beyond `border-radius`, using mathematical `superellipse()` functions. Now supports scroll-driven animation timelines (Chrome 139+, coming to Firefox via Interop 2026):
+
+```css
+/* Define the animation */
+@keyframes corner-morph {
+  from { corner-shape: round; }        /* superellipse(1) */
+  to   { corner-shape: squircle; }     /* superellipse(2) */
+}
+
+/* Scroll-driven timeline */
+.morphing-element {
+  animation: corner-morph linear;
+  animation-timeline: scroll(root);    /* Ties animation to scroll position */
+  animation-range: 0% 100%;
+}
+
+/* Or with JS control for broader support */
+.morphing-element {
+  corner-shape: superellipse(var(--corner-value));
+  transition: corner-shape 0.3s ease;
+}
+```
+
+**Available corner-shape values:**
+- `square` = `superellipse(infinity)` — sharp corners
+- `squircle` = `superellipse(2)` — Apple-style rounded squares  
+- `round` = `superellipse(1)` — perfect circle sectors
+- `bevel` = `superellipse(0)` — chamfered edges
+- `scoop` = `superellipse(-1)` — concave corners
+- `notch` = `superellipse(-infinity)` — inverted corners
+
+**React/GSAP Integration:**
+```tsx
+// Animate corner-shape with GSAP for better browser support
+useLayoutEffect(() => {
+  gsap.to(elementRef.current, {
+    '--corner-value': 2,  // animates to squircle
+    duration: 1,
+    scrollTrigger: {
+      trigger: elementRef.current,
+      start: 'top center',
+      end: 'bottom center',
+      scrub: 1
+    }
+  });
+}, []);
+```
+
+Use for: dynamic button states, morphing containers, scroll-reactive UI elements, progressive brand shape transitions.
 
 ### Hand Gesture Particle Control
 *Source: Reddit - MediaPipe + Particle Simulation*
