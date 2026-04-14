@@ -24,6 +24,8 @@ Drop-in code snippets for common creative web patterns. Each recipe is a self-co
 9. [Staggered Grid Entrance](#staggered-grid)
 10. [Horizontal Scroll Section](#horizontal-scroll)
 11. [Native View Transitions](#view-transitions)
+12. [Proximity Typography Interaction](#proximity-typography)
+13. [View Transition Effect Recipes](#view-transition-effects)
 
 ---
 
@@ -826,3 +828,414 @@ function DetailView({ item, onBack }: { item: number; onBack: () => void }) {
 - Keep transitions under 500ms for snappy feel
 - Test with `prefers-reduced-motion` users
 - Combine with React Router or Next.js navigation for seamless page transitions
+
+---
+
+## 12. Proximity Typography Interaction {#proximity-typography}
+
+**What it does:** Typography that responds to cursor proximity with smooth font weight and color transitions based on Euclidean distance. Text elements within the cursor's radius become bolder and change color, creating an interactive field of responsive typography.
+
+**Strengths:**
+- Demonstrates variable font capabilities in a tangible, playful way  
+- Creates immediate visual feedback that makes typography feel alive
+- Reveals the precision of font interpolation between weight extremes
+- No instructions needed — behavior is intuitive and discoverable
+- Excellent for type specimens, title sequences, and interactive headers
+
+**Use when:**
+- Font showcases and type specimen pages
+- Large headline sections where you want interaction  
+- Typography-forward landing pages
+- Creative portfolios focused on typographic work
+- Brand microsites where the typeface itself is the hero
+
+**Don't use when:**
+- Body text or reading-focused content (too distracting)
+- Mobile interfaces (no precise cursor control)
+- Accessibility-critical text (changes can confuse screen readers)
+- Small text sizes (effect won't be visible enough)
+
+**Dependencies:** Variable font with weight axis
+
+```tsx
+"use client";
+import { useEffect, useRef } from "react";
+
+export function ProximityTypography({ 
+  text, 
+  className = "",
+  radius = 120 
+}: { 
+  text: string;
+  className?: string;
+  radius?: number;
+}) {
+  const containerRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    const container = containerRef.current;
+    if (!container) return;
+
+    const letters = Array.from(container.querySelectorAll('.letter'));
+    const distances = new Array(letters.length).fill(0);
+    let isHovering = false;
+    let rafId: number;
+
+    // Define concentric rings of influence
+    const rings = [
+      { distance: radius * 1.00, weight: 200, color: '#0000cb', opacity: 0.6 },
+      { distance: radius * 0.75, weight: 300, color: '#2546FF', opacity: 0.7 },
+      { distance: radius * 0.55, weight: 400, color: '#5C92FF', opacity: 0.8 },
+      { distance: radius * 0.45, weight: 500, color: '#FFCE2E', opacity: 0.9 },
+      { distance: radius * 0.35, weight: 700, color: '#FFAE00', opacity: 0.95 },
+      { distance: radius * 0.25, weight: 800, color: '#FF6200', opacity: 1 },
+      { distance: radius * 0.125, weight: 900, color: '#FF0B00', opacity: 1 },
+    ];
+
+    function processMouseMove(e: MouseEvent) {
+      for (let i = 0; i < letters.length; i++) {
+        const letter = letters[i] as HTMLElement;
+        const rect = letter.getBoundingClientRect();
+        const centerX = rect.left + rect.width / 2;
+        const centerY = rect.top + rect.height / 2;
+
+        distances[i] = Math.sqrt(
+          (e.clientX - centerX) ** 2 + (e.clientY - centerY) ** 2
+        );
+      }
+    }
+
+    function animate() {
+      for (let i = 0; i < letters.length; i++) {
+        const letter = letters[i] as HTMLElement;
+        const dist = distances[i];
+
+        // Find which ring this letter falls into
+        let appliedRing = rings[0]; // default to outermost ring
+        
+        for (const ring of rings) {
+          if (dist <= ring.distance) {
+            appliedRing = ring;
+          }
+        }
+
+        // Apply styles via CSS custom properties
+        letter.style.setProperty('--font-weight', appliedRing.weight.toString());
+        letter.style.setProperty('--letter-color', appliedRing.color);
+        
+        // Fade out letters far from cursor
+        if (dist > rings[0].distance * 1.5) {
+          const opacity = Math.max(0.3, 1 - (dist - rings[0].distance) / (radius * 0.5));
+          letter.style.setProperty('--opacity', isHovering ? opacity.toString() : '1');
+        } else {
+          letter.style.setProperty('--opacity', appliedRing.opacity.toString());
+        }
+      }
+      
+      rafId = requestAnimationFrame(animate);
+    }
+
+    function handleMouseEnter() {
+      isHovering = true;
+      animate();
+    }
+
+    function handleMouseLeave() {
+      isHovering = false;
+      // Reset all letters to default state
+      letters.forEach(letter => {
+        const el = letter as HTMLElement;
+        el.style.setProperty('--font-weight', '200');
+        el.style.setProperty('--letter-color', '#0000cb');
+        el.style.setProperty('--opacity', '1');
+      });
+      cancelAnimationFrame(rafId);
+    }
+
+    container.addEventListener('mousemove', processMouseMove);
+    container.addEventListener('mouseenter', handleMouseEnter);
+    container.addEventListener('mouseleave', handleMouseLeave);
+
+    return () => {
+      container.removeEventListener('mousemove', processMouseMove);
+      container.removeEventListener('mouseenter', handleMouseEnter);
+      container.removeEventListener('mouseleave', handleMouseLeave);
+      cancelAnimationFrame(rafId);
+    };
+  }, [radius]);
+
+  return (
+    <div 
+      ref={containerRef}
+      className={`inline-block select-none ${className}`}
+      style={{ cursor: 'none' }}
+    >
+      {text.split('').map((char, i) => (
+        <span 
+          key={i}
+          className="letter inline-block transition-all duration-100 ease-out"
+          style={{
+            fontVariationSettings: 'var(--font-weight, 200)',
+            color: 'var(--letter-color, #0000cb)',
+            opacity: 'var(--opacity, 1)',
+            fontWeight: 'var(--font-weight, 200)',
+          }}
+        >
+          {char === ' ' ? '\u00A0' : char}
+        </span>
+      ))}
+    </div>
+  );
+}
+```
+
+**Usage example:**
+```tsx
+<ProximityTypography 
+  text="EXAT VARIABLE FONT SHOWCASE"
+  className="text-8xl font-variable"
+  radius={100}
+/>
+```
+
+**Tuning tips:**
+- Requires a variable font with weight axis (wght) — test with Inter Variable or custom fonts
+- `radius={80}` for tight interaction, `radius={150}` for wider influence
+- Adjust ring distances for more gradual or dramatic weight transitions  
+- Add touch device fallback: static maximum weight with subtle animation
+- Use `will-change: font-variation-settings` on letters for better performance
+- Consider preloading all font weights used in the rings to prevent loading flicker
+
+*Technique source: [Codrops Exat Microsite](https://tympanus.net/codrops/2026/04/10/the-exat-microsite-pushing-a-typography-showcase-to-new-creative-extremes/)*
+
+---
+
+## 13. View Transition Effect Recipes {#view-transition-effects}
+
+**What it does:** Ready-to-use CSS animation recipes for the View Transitions API. Each recipe provides specific `@keyframes` and transition types for common creative page transition patterns.
+
+**Strengths:**
+- Copy-paste ready — no need to write custom animations from scratch
+- Covers common creative transition patterns (wipes, flips, dissolves)
+- Uses modern browser APIs for smooth, hardware-accelerated transitions  
+- Progressive enhancement — gracefully falls back to instant transitions
+
+**Use when:**
+- Page-to-page navigation needs creative flair
+- App-like transitions between major UI states
+- Brand microsites where every interaction should impress
+- Multi-step processes (quiz, onboarding, checkout)
+
+**Don't use when:**
+- Frequent navigation (effects become tiring)
+- Users have `prefers-reduced-motion: reduce` set
+- Older browser support is critical
+
+**Browser support:** Chrome 111+, Edge 111+, Safari 18+, Firefox (partial)
+
+### Pixelate Dissolve
+
+Blur-based dissolve that feels like a camera losing focus:
+
+```css
+@media (prefers-reduced-motion: no-preference) {
+  @view-transition {
+    navigation: auto;
+    types: pixelate-dissolve;
+  }
+}
+
+html:active-view-transition-type(pixelate-dissolve)::view-transition-old(root) {
+  animation: pixelate-out 1.4s ease forwards;
+}
+
+html:active-view-transition-type(pixelate-dissolve)::view-transition-new(root) {
+  animation: pixelate-in 1.4s ease forwards;
+}
+
+@keyframes pixelate-out {
+  0% { filter: blur(0px); opacity: 1; }
+  100% { filter: blur(40px); opacity: 0; }
+}
+
+@keyframes pixelate-in {
+  0% { filter: blur(40px); opacity: 0; }
+  100% { filter: blur(0px); opacity: 1; }
+}
+```
+
+### Directional Wipes
+
+Clean geometric transitions. Change `inset()` values for different directions:
+
+```css
+/* Wipe Up */
+@media (prefers-reduced-motion: no-preference) {
+  @view-transition { navigation: auto; types: wipe-up; }
+}
+
+html:active-view-transition-type(wipe-up)::view-transition-old(root) {
+  animation: wipe-out 1.4s ease forwards;
+}
+
+html:active-view-transition-type(wipe-up)::view-transition-new(root) {
+  animation: wipe-in 1.4s ease forwards;
+}
+
+@keyframes wipe-out {
+  from { clip-path: inset(0 0 0 0); }
+  to { clip-path: inset(0 0 100% 0); }
+}
+
+@keyframes wipe-in {
+  from { clip-path: inset(100% 0 0 0); }
+  to { clip-path: inset(0 0 0 0); }
+}
+
+/* Wipe Right: change to inset(0 0 0 100%) and inset(0 100% 0 0) */
+/* Wipe Down: change to inset(100% 0 0 0) and inset(0 0 100% 0) */
+```
+
+### Circle Wipe
+
+Organic reveal from center outward:
+
+```css
+@media (prefers-reduced-motion: no-preference) {
+  @view-transition { navigation: auto; types: circular-wipe; }
+}
+
+html:active-view-transition-type(circular-wipe)::view-transition-old(root) {
+  animation: circle-wipe-out 1.4s ease forwards;
+}
+
+html:active-view-transition-type(circular-wipe)::view-transition-new(root) {
+  animation: circle-wipe-in 1.4s ease forwards;
+}
+
+@keyframes circle-wipe-out {
+  to { clip-path: circle(0% at 50% 50%); }
+}
+
+@keyframes circle-wipe-in {
+  from { clip-path: circle(0% at 50% 50%); }
+  to { clip-path: circle(150% at 50% 50%); }
+}
+```
+
+### 3D Flip
+
+Card-like flip transition:
+
+```css
+@media (prefers-reduced-motion: no-preference) {
+  @view-transition { navigation: auto; types: flip-3d; }
+}
+
+html:active-view-transition-type(flip-3d)::view-transition-old(root) {
+  animation: flip-out 1.4s ease forwards;
+}
+
+html:active-view-transition-type(flip-3d)::view-transition-new(root) {
+  animation: flip-in 1.4s ease forwards;
+}
+
+@keyframes flip-out {
+  0% { transform: rotateY(0deg) translateX(0vw); }
+  100% { transform: rotateY(-90deg) translateX(-100vw); opacity: 1; }
+}
+
+@keyframes flip-in {
+  0% { transform: rotateY(90deg) translateX(100vw); }
+  100% { transform: rotateY(0deg) translateX(0vw); }
+}
+```
+
+### Curtain Reveal
+
+Theater curtain effect:
+
+```css
+@media (prefers-reduced-motion: no-preference) {
+  @view-transition { navigation: auto; types: curtain; }
+}
+
+html:active-view-transition-type(curtain)::view-transition-old(root) {
+  animation: curtain-out 1.4s ease forwards;
+}
+
+html:active-view-transition-type(curtain)::view-transition-new(root) {
+  animation: curtain-in 1.4s ease forwards;
+}
+
+@keyframes curtain-out {
+  from { clip-path: inset(0 0 0 0); }
+  to { clip-path: inset(0 50% 0 50%); }
+}
+
+@keyframes curtain-in {
+  from { clip-path: inset(0 50% 0 50%); }
+  to { clip-path: inset(0 0 0 0); }
+}
+```
+
+### Diagonal Push
+
+Dynamic slide from corner:
+
+```css
+@media (prefers-reduced-motion: no-preference) {
+  @view-transition { navigation: auto; types: diagonal-push; }
+}
+
+html:active-view-transition-type(diagonal-push)::view-transition-old(root) {
+  animation: diagonal-out 1.4s ease forwards;
+}
+
+html:active-view-transition-type(diagonal-push)::view-transition-new(root) {
+  animation: diagonal-in 1.4s ease forwards;
+}
+
+@keyframes diagonal-out {
+  to { transform: translate(-100%, -100%); opacity: 0; }
+}
+
+@keyframes diagonal-in {
+  from { transform: translate(100%, 100%); opacity: 0; }
+}
+```
+
+**Usage in React/Next.js:**
+
+```tsx
+// Trigger specific transition types programmatically
+function navigateWithTransition(href: string, transitionType: string) {
+  if (!('startViewTransition' in document)) {
+    // Fallback for unsupported browsers
+    window.location.href = href;
+    return;
+  }
+
+  // Set transition type on document for CSS targeting
+  document.documentElement.dataset.transition = transitionType;
+  
+  // Start the transition
+  document.startViewTransition(() => {
+    window.location.href = href;
+  });
+}
+
+// Example usage
+<button onClick={() => navigateWithTransition('/page2', 'flip-3d')}>
+  Flip to Page 2
+</button>
+```
+
+**Tuning tips:**
+- Keep durations under 1.5s — longer feels sluggish
+- Use `ease` or `cubic-bezier(0.4, 0.0, 0.2, 1)` for natural motion
+- Test with different `clip-path` positions for custom wipe directions
+- Combine multiple effects: blur + scale, wipe + opacity, etc.
+- Always wrap in `prefers-reduced-motion: no-preference` media query
+
+*Recipes source: [CSS-Tricks View Transitions](https://css-tricks.com/7-view-transitions-recipes-to-try/)*
