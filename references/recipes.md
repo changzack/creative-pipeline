@@ -26,6 +26,7 @@ Drop-in code snippets for common creative web patterns. Each recipe is a self-co
 11. [Native View Transitions](#view-transitions)
 12. [Proximity Typography Interaction](#proximity-typography)
 13. [View Transition Effect Recipes](#view-transition-effects)
+14. [Astro + Barba.js Page Transitions](#astro-barba-transitions)
 
 ---
 
@@ -998,6 +999,46 @@ export function ProximityTypography({
 />
 ```
 
+**Advanced: Production-Grade Ring System**
+
+*From [Codrops Exat Microsite](https://tympanus.net/codrops/2026/04/10/the-exat-microsite-pushing-a-typography-showcase-to-new-creative-extremes/) (Apr 2026)*
+
+For production typography specimens, use this precision ring system:
+
+```tsx
+// Precise concentric rings with optimized performance
+const rings = [
+  { distance: radius * 1.00, weight: 200, color: '#0000cb' }, // outermost
+  { distance: radius * 0.75, weight: 300, color: '#2546FF' },
+  { distance: radius * 0.55, weight: 400, color: '#5C92FF' },
+  { distance: radius * 0.45, weight: 500, color: '#FFCE2E' }, // highlight zone
+  { distance: radius * 0.35, weight: 700, color: '#FFAE00' },
+  { distance: radius * 0.25, weight: 800, color: '#FF6200' },
+  { distance: radius * 0.125, weight: 900, color: '#FF0B00' }, // innermost
+];
+
+// Optimized: batch DOM updates in RAF
+function animate() {
+  for (let i = 0; i < letters.length; i++) {
+    const dist = distances[i];
+    let ring = rings[0]; // default to outermost
+    
+    // Find applicable ring (innermost match wins)
+    for (const r of rings) {
+      if (dist <= r.distance) ring = r;
+    }
+    
+    // Single batch update per letter
+    letters[i].style.cssText = `
+      --fw: ${ring.weight};
+      --color: ${ring.color};
+      --opacity: ${dist > rings[0].distance * 2 ? 0.3 : 1};
+    `;
+  }
+  requestAnimationFrame(animate);
+}
+```
+
 **Tuning tips:**
 - Requires a variable font with weight axis (wght) — test with Inter Variable or custom fonts
 - `radius={80}` for tight interaction, `radius={150}` for wider influence
@@ -1005,8 +1046,7 @@ export function ProximityTypography({
 - Add touch device fallback: static maximum weight with subtle animation
 - Use `will-change: font-variation-settings` on letters for better performance
 - Consider preloading all font weights used in the rings to prevent loading flicker
-
-*Technique source: [Codrops Exat Microsite](https://tympanus.net/codrops/2026/04/10/the-exat-microsite-pushing-a-typography-showcase-to-new-creative-extremes/)*
+- **Performance:** Use `cssText` for batch property updates instead of individual `setProperty()` calls
 
 ---
 
@@ -1239,3 +1279,378 @@ function navigateWithTransition(href: string, transitionType: string) {
 - Always wrap in `prefers-reduced-motion: no-preference` media query
 
 *Recipes source: [CSS-Tricks View Transitions](https://css-tricks.com/7-view-transitions-recipes-to-try/)*
+
+---
+
+## 14. Astro + Barba.js Page Transitions {#astro-barba-transitions}
+
+**What it does:** Seamless page transitions in Astro using Barba.js + GSAP with sync mode for simultaneous animations. Pages animate out while the next page animates in, creating cinematic transitions that work across all browsers.
+
+**Strengths:**
+- **Universal browser support** — works everywhere, unlike View Transitions API (Chrome 111+ only)
+- **Sync mode** — both outgoing and incoming pages animate simultaneously for richer effects
+- **Framework-agnostic** — works with Astro, Next.js, vanilla sites, any SSG/SPA
+- **Granular control** — precise timing, custom easing, complex choreography with GSAP
+- **Shared element continuity** — elements can persist across page changes
+- **Performance** — only swaps the content container, not the full page
+
+**Use when:**
+- Multi-page Astro sites that need app-like navigation
+- Portfolio sites where every transition should impress
+- Brand microsites with storytelling flow
+- Editorial sites where section changes feel like "chapters"
+- When View Transitions API browser support isn't sufficient
+
+**Don't use when:**
+- Single-page React apps (use View Transitions or Framer Motion instead)
+- Sites with complex form state that would break on page swap
+- SEO-critical sites where JS-free navigation is essential (though this degrades gracefully)
+
+**Dependencies:** `npm i barba.js gsap`
+
+### Base Astro Layout Setup
+
+```astro
+---
+// src/layouts/Layout.astro
+export interface Props {
+  title: string;
+  uid: string; // unique identifier for each page
+}
+const { title, uid } = Astro.props;
+---
+
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>{title}</title>
+  <!-- Barba.js CSS for transition prevention -->
+  <style>
+    .is__transitioning * {
+      pointer-events: none !important;
+    }
+  </style>
+</head>
+<body data-barba="wrapper">
+  <!-- Container that gets swapped by Barba -->
+  <div data-barba="container" data-barba-namespace={uid} class="app__wrapper">
+    <main class="content__wrapper">
+      <slot />
+    </main>
+  </div>
+  
+  <!-- Barba.js scripts loaded after content -->
+  <script src="/scripts/barba-transitions.js" type="module"></script>
+</body>
+</html>
+```
+
+### Core Barba.js Transition Engine
+
+```javascript
+// public/scripts/barba-transitions.js
+import barba from 'https://cdn.skypack.dev/@barba/core';
+import { gsap } from 'https://cdn.skypack.dev/gsap';
+
+// Utility selector function
+const select = (selector) => document.querySelector(selector);
+
+class PageTransitions {
+  constructor() {
+    this.barbaWrapper = select("[data-barba='wrapper']");
+    this.initBarba();
+  }
+
+  initBarba() {
+    gsap.registerPlugin(gsap.plugins);
+
+    barba.init({
+      transitions: [
+        {
+          name: "default-transition",
+          sync: true, // 🔥 Key feature: both pages animate simultaneously
+          
+          before: (data) => {
+            // Add transitioning class to prevent interaction
+            this.barbaWrapper.classList.add("is__transitioning");
+            
+            // Set up incoming page (hidden, scaled down, clipped)
+            gsap.set(data.next.container, {
+              position: "fixed",
+              inset: 0,
+              scale: 0.6,
+              clipPath: "inset(100% 0 0 0)", // hidden above viewport
+              zIndex: 3,
+              willChange: "transform, clip-path",
+            });
+            
+            // Prepare outgoing page
+            gsap.set(data.current.container, {
+              zIndex: 2,
+              willChange: "transform",
+            });
+          },
+          
+          enter: (data) => {
+            // Simultaneous animations
+            const tl = gsap.timeline();
+            
+            // Animate incoming page: clip reveal + scale to normal
+            tl.to(data.next.container, {
+              clipPath: "inset(0% 0 0 0)",
+              duration: 1.2,
+              ease: "hop", // custom easing (see below)
+            })
+            .to(data.next.container, {
+              scale: 1,
+              duration: 1.2,
+              ease: "hop",
+            }, 0); // start at same time (position 0)
+            
+            // Animate outgoing page: fade + slight scale down
+            tl.to(data.current.container, {
+              opacity: 0,
+              scale: 0.95,
+              duration: 0.8,
+              ease: "power2.inOut",
+            }, 0);
+            
+            return tl;
+          },
+          
+          after: (data) => {
+            // Cleanup after transition
+            this.barbaWrapper.classList.remove("is__transitioning");
+            
+            gsap.set([data.next.container, data.current.container], {
+              clearProps: "all", // reset all GSAP properties
+            });
+          },
+        },
+        
+        // Additional transition for specific namespaces
+        {
+          name: "hero-transition",
+          from: { namespace: ["home"] },
+          to: { namespace: ["about", "work"] },
+          sync: true,
+          
+          enter: (data) => {
+            // Custom transition for hero pages
+            const tl = gsap.timeline();
+            
+            // Diagonal wipe reveal
+            tl.fromTo(data.next.container, {
+              clipPath: "polygon(0% 100%, 100% 100%, 100% 100%, 0% 100%)",
+            }, {
+              clipPath: "polygon(0% 0%, 100% 0%, 100% 100%, 0% 100%)",
+              duration: 1.5,
+              ease: "power3.inOut",
+            });
+            
+            // Slide out current page
+            tl.to(data.current.container, {
+              x: "-100%",
+              duration: 1.2,
+              ease: "power3.inOut",
+            }, 0);
+            
+            return tl;
+          },
+        },
+      ],
+    });
+  }
+}
+
+// Custom GSAP easing
+gsap.registerEase("hop", "0.56, 0, 0.35, 0.98");
+
+// Initialize when DOM is ready
+document.addEventListener("DOMContentLoaded", () => {
+  new PageTransitions();
+});
+```
+
+### Example Pages
+
+```astro
+---
+// src/pages/index.astro
+---
+<Layout title="Home" uid="home">
+  <div class="content">
+    <h1 class="title">Welcome Home</h1>
+    <p>This page will transition smoothly to others</p>
+    <a href="/about">About →</a>
+  </div>
+</Layout>
+
+<style>
+.content {
+  min-height: 100vh;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-direction: column;
+  background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+  color: white;
+}
+
+.title {
+  font-size: 15vw;
+  text-transform: uppercase;
+  margin-bottom: 2rem;
+}
+</style>
+```
+
+```astro
+---
+// src/pages/about.astro
+---
+<Layout title="About" uid="about">
+  <div class="content">
+    <h1 class="title">About Us</h1>
+    <p>Smooth transitions make everything feel connected</p>
+    <a href="/">← Home</a>
+  </div>
+</Layout>
+
+<style>
+.content {
+  min-height: 100vh;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-direction: column;
+  background: linear-gradient(135deg, #f093fb 0%, #f5576c 100%);
+  color: white;
+}
+</style>
+```
+
+### Advanced: Shared Element Transitions
+
+For elements that should persist across pages (like navigation):
+
+```javascript
+// Enhanced transition with shared elements
+{
+  name: "shared-element-transition",
+  sync: true,
+  
+  beforeLeave: (data) => {
+    // Clone shared elements before page swap
+    const nav = data.current.container.querySelector('.main-nav');
+    if (nav) {
+      const navClone = nav.cloneNode(true);
+      navClone.classList.add('nav-clone');
+      document.body.appendChild(navClone);
+    }
+  },
+  
+  enter: (data) => {
+    const navClone = document.querySelector('.nav-clone');
+    const newNav = data.next.container.querySelector('.main-nav');
+    
+    if (navClone && newNav) {
+      // Hide new nav initially
+      gsap.set(newNav, { opacity: 0 });
+      
+      const tl = gsap.timeline();
+      
+      // Transition clone to new position
+      tl.to(navClone, {
+        x: newNav.offsetLeft - navClone.offsetLeft,
+        y: newNav.offsetTop - navClone.offsetTop,
+        duration: 0.8,
+        ease: "power3.inOut",
+      })
+      .to(newNav, { opacity: 1, duration: 0.3 })
+      .call(() => {
+        navClone.remove(); // cleanup clone
+      });
+      
+      return tl;
+    }
+  },
+}
+```
+
+### Performance Optimizations
+
+```javascript
+// Optimized transition with preloading
+barba.init({
+  // Preload pages on hover for instant navigation
+  prefetchIgnore: true,
+  
+  transitions: [{
+    // ... existing transition
+    
+    beforeEnter: (data) => {
+      // Reset scroll position
+      window.scrollTo(0, 0);
+      
+      // Preload critical images on new page
+      const images = data.next.container.querySelectorAll('img[data-preload]');
+      images.forEach(img => {
+        if (!img.complete) {
+          img.onload = () => gsap.set(img, { opacity: 1 });
+          gsap.set(img, { opacity: 0 });
+        }
+      });
+    },
+  }],
+  
+  // Debug mode for development
+  debug: process.env.NODE_ENV === 'development',
+});
+
+// Add link preloading on hover
+document.addEventListener('mouseover', (e) => {
+  const link = e.target.closest('a[href]');
+  if (link && link.hostname === location.hostname) {
+    barba.cache.set(link.href, 'preload');
+  }
+});
+```
+
+### Mobile Adaptations
+
+```javascript
+// Reduced motion for mobile/accessibility
+const prefersReducedMotion = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+const isMobile = window.innerWidth < 768;
+
+const transitionDuration = prefersReducedMotion ? 0.3 : (isMobile ? 0.8 : 1.2);
+
+// Simpler transitions for mobile
+if (isMobile) {
+  // Fade-only transition for performance
+  enter: (data) => {
+    return gsap.fromTo(data.next.container, 
+      { opacity: 0 },
+      { opacity: 1, duration: transitionDuration, ease: "power2.out" }
+    );
+  }
+} else {
+  // Full clip-path + scale transition for desktop
+  // ... (use the full transition code from above)
+}
+```
+
+**Tuning tips:**
+- `sync: true` is the key for cinematic transitions — both pages animate together
+- Use `clipPath` for reveal effects: `inset()`, `polygon()`, `circle()` all work
+- Add `willChange` properties before animation for better performance
+- Test on slower devices — clip-path can be expensive, simplify for mobile
+- Combine with intersection observer for staggered content reveals after transition
+- Use `data-barba-namespace` to create page-specific transition variants
+
+**Browser support:** Universal — Barba.js is pure JavaScript, GSAP handles CSS transforms efficiently across all browsers.
+
+*Inspired by: [Codrops - Creating Custom Page Transitions in Astro with Barba.js and GSAP](https://tympanus.net/codrops/2026/04/08/creating-custom-page-transitions-in-astro-with-barba-js-and-gsap/) (Apr 2026)*
