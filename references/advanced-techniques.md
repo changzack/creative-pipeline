@@ -16,6 +16,238 @@ Deeper techniques for when you need to push beyond standard animation libraries.
 
 ---
 
+## Persistent 3D Scenes with Page Transitions {#persistent-3d}
+
+**Breakthrough pattern for seamless multi-page WebGL experiences.** A single Three.js context survives across page navigation, with smooth camera movements and content transitions instead of reloading the 3D scene.
+
+*Source: [Codrops - Seamless 3D Transitions](https://tympanus.net/codrops/2026/03/18/building-seamless-3d-transitions-with-webflow-gsap-and-three-js/) (Mar 2026)*
+
+### The Core Architecture
+
+Unlike traditional page transitions that reload everything, this pattern maintains:
+- **One persistent Canvas** — never destroyed or recreated
+- **Single Experience instance** — scene, renderer, resources persist
+- **Route-based camera movement** — slides between 3D objects positioned along axes
+- **Content swapping** — only HTML content changes, 3D scene stays alive
+
+### Key Technologies
+
+- **Barba.js** — handles page transitions and DOM swapping
+- **Three.js** — persistent 3D scene with models positioned spatially  
+- **GSAP** — smooth camera movement and text animations
+- **Vite + Webflow** — build system for external script deployment
+
+### Implementation Pattern
+
+```tsx
+// 1. Experience as singleton - persists across navigation
+export default class Experience {
+  constructor(canvas) {
+    // Only created ONCE on first page load
+    this.canvas = canvas;
+    this.scene = new THREE.Scene();
+    this.camera = new Camera(); // Position: (0, 0, 1)
+    this.renderer = new Renderer();
+    this.world = new World(); // Models positioned along X-axis
+  }
+  
+  // Never destroyed - this is the key insight
+}
+
+// 2. World positions models spatially for camera movement
+class World {
+  constructor() {
+    this.modelsGroup = new THREE.Group();
+    
+    // Position models along X-axis for camera sliding
+    const modelsConfig = [
+      { name: 'pen', positionX: 0 },     // /pen → camera.position.x = 0
+      { name: 'cup', positionX: 3 },     // /cup → camera.position.x = 3  
+      { name: 'suzanne', positionX: 6 }  // /suzanne → camera.position.x = 6
+    ];
+    
+    this.models = modelsConfig.map(({ name, positionX }) =>
+      new Model(name, positionX, this.modelsGroup)
+    );
+  }
+}
+
+// 3. Barba handles page swapping, NOT 3D scene
+barba.init({
+  transitions: [{
+    name: 'default-transition',
+    
+    once({ next }) {
+      // Create Experience ONCE - never again
+      experience = new Experience(document.querySelector('.webgl'));
+      animateCameraToNamespace(next.namespace, experience);
+    },
+    
+    leave(data) {
+      // Animate content OUT while camera moves
+      return transitionOut(data); // GSAP timeline
+    },
+    
+    enter(data) {
+      // Camera + content animate IN together  
+      animateCameraToNamespace(data.next.namespace, experience);
+      return transitionIn(data); // GSAP timeline
+    }
+  }]
+});
+
+// 4. Camera movement maps routes to 3D positions
+const cameraPositionsByNamespace = {
+  pen: 0,
+  cup: 3,
+  suzanne: 6
+};
+
+function animateCameraToNamespace(namespace, experience) {
+  const targetX = cameraPositionsByNamespace[namespace] ?? 0;
+  gsap.to(experience.camera.instance.position, {
+    x: targetX,
+    duration: 2,
+    ease: 'expo.inOut'
+  });
+}
+```
+
+### Critical Markup Structure
+
+```html
+<!-- Canvas lives OUTSIDE Barba container - never swapped -->
+<body data-barba="wrapper">
+  <canvas class="webgl"></canvas>
+  
+  <!-- Only this gets swapped between pages -->
+  <div data-barba="container" data-barba-namespace="pen">
+    <h1 data-animation="title">Pen Page</h1>
+    <p data-animation="text">Content about pens...</p>
+  </div>
+</body>
+```
+
+### Advanced Techniques from the Pattern
+
+**1. Canvas Blend Modes for Paper Texture:**
+```css
+/* Canvas multiply blend with background texture */
+.webgl {
+  mix-blend-mode: multiply;
+  /* Paper texture positioned behind canvas */
+}
+
+.paper-background {
+  position: absolute;
+  z-index: -1;
+  background-image: url('/paper-texture.jpg');
+  /* WebGL renders on top, blends with paper */
+}
+```
+
+**2. ShadowMaterial for Grounded Scenes:**
+```tsx
+// Invisible plane that only shows cast shadows
+const shadowPlane = new THREE.Mesh(
+  new THREE.PlaneGeometry(10, 10),
+  new THREE.ShadowMaterial({ opacity: 0.3 })
+);
+shadowPlane.position.z = -0.25; // Slightly behind models
+shadowPlane.receiveShadow = true;
+
+// Result: shadows appear directly on page background,
+// not on visible geometry - seamless integration
+```
+
+**3. Mouse-Reactive Model Groups:**
+```tsx
+// Each model has nested structure for mouse interaction
+class Model {
+  constructor(name, positionX, parent) {
+    this.group = new THREE.Group();
+    this.group.position.x = positionX;
+    
+    // mouseGroup provides subtle cursor following
+    this.mouseGroup = new THREE.Group();
+    this.group.add(this.mouseGroup);
+    
+    // model goes inside mouseGroup for reactivity
+    this.mouseGroup.add(this.model);
+    parent.add(this.group);
+  }
+}
+
+// In render loop - models follow cursor subtly
+useFrame(() => {
+  const targetRotationX = mouseY * 0.0005;
+  const targetRotationY = mouseX * 0.0005;
+  
+  models.forEach(model => {
+    model.mouseGroup.rotation.x = lerp(
+      model.mouseGroup.rotation.x,
+      targetRotationX,
+      0.08
+    );
+  });
+});
+```
+
+### When to Use This Pattern
+
+**Perfect for:**
+- Portfolio sites with consistent 3D branding across pages
+- Product showcases where each page represents a different model
+- Narrative sites where 3D scene tells a story across multiple pages
+- Brand sites needing premium feel without reload flicker
+
+**Requirements:**
+- Static site generation (Gatsby, Next.js, Astro) or headless CMS
+- Models can be positioned spatially (not all in same location)
+- Consistent 3D aesthetic across all pages
+- Performance budget for persistent 3D context
+
+### Performance Considerations
+
+**Benefits:**
+- No model reloading between pages
+- No Three.js context recreation
+- Smooth experience vs page reload flicker
+- Progressive loading - models loaded once, cached
+
+**Costs:**
+- 3D context always running (battery impact on mobile)
+- Memory footprint higher than traditional sites  
+- Initial load includes all models for the experience
+- Requires careful resource management
+
+### Accessibility Adaptations
+
+```tsx
+// Respect prefers-reduced-motion
+const mm = gsap.matchMedia();
+mm.add('(prefers-reduced-motion: no-preference)', () => {
+  // Full camera movement and text animations
+});
+
+mm.add('(prefers-reduced-motion: reduce)', () => {
+  // Instant page swaps, no camera movement
+  gsap.set(camera.position, { x: targetX });
+});
+```
+
+### Production Examples
+
+This pattern powers sites like:
+- **Portfolio/Agency sites** — continuous 3D brand presence
+- **Product showcases** — each page = different 3D model  
+- **Storytelling sites** — 3D environment that evolves with narrative
+- **Premium brand experiences** — seamless luxury feel
+
+The technique represents a fundamental shift from "pages with 3D elements" to "a 3D world with page content" — opening new creative possibilities for cohesive digital experiences.
+
+---
+
 ## Custom GLSL Shaders {#shaders}
 
 Shaders run on the GPU and enable effects impossible with CSS or JavaScript alone.
@@ -480,6 +712,85 @@ gsap.from(".svg-path", {
 });
 ```
 
+### easeReverse for Better UI Animations
+*Source: [Codrops - A Playful Clip Menu with GSAP's easeReverse](https://tympanus.net/codrops/2026/04/22/a-playful-clip-menu-with-gsaps-easereverse/) (Apr 2026)*
+
+**GSAP 3.15+ breakthrough:** When reversing animations, `easeReverse` lets you specify a different easing curve for the reverse direction. This solves the common problem where an `ease-out` animation played backwards becomes sluggish `ease-in`.
+
+**The problem:** 
+```tsx
+// This feels awkward when reversed
+gsap.to(menu, {
+  x: 300,
+  duration: 0.8,
+  ease: "expo.out"  // Smooth entry, but jerky when reversed
+});
+
+// Later: menu.reverse(); // Now it's expo.IN — feels sluggish
+```
+
+**The solution:**
+```tsx
+const tl = gsap.timeline();
+
+tl.to(menu, {
+  x: 300,
+  duration: 0.8,
+  ease: "expo.out",
+  easeReverse: "elastic.out(0.3)" // Different feel for reverse direction
+});
+
+// Usage in menu toggle
+const isOpen = useRef(false);
+
+const toggleMenu = () => {
+  if (isOpen.current) {
+    tl.reverse(); // Uses elastic.out(0.3)
+  } else {
+    tl.play();    // Uses expo.out
+  }
+  isOpen.current = !isOpen.current;
+};
+```
+
+**Advanced pattern for scattering UI:**
+```tsx
+// Menu items scatter outward on open, smoothly return on close
+items.forEach((item, i) => {
+  const tl = gsap.timeline({ paused: true });
+  
+  tl.to(item, {
+    x: gsap.utils.random(-200, 200),
+    y: gsap.utils.random(-200, 200),
+    opacity: 0,
+    rotation: gsap.utils.random(-30, 30),
+    duration: 0.7,
+    ease: "expo.out",
+    easeReverse: "elastic.out(0.3)", // Bouncy return feel
+  });
+  
+  menuTimelines.push(tl);
+});
+
+// Toggle all items with stagger
+const toggleMenu = () => {
+  menuTimelines.forEach((tl, i) => {
+    const delay = i * 0.05;
+    if (isOpen) {
+      gsap.delayedCall(delay, () => tl.reverse());
+    } else {
+      gsap.delayedCall(delay, () => tl.play());
+    }
+  });
+};
+```
+
+**Best practices:**
+- **Modal/drawer interactions** — Use softer reverse easing to make dismissals feel gentle
+- **Scatter/gather patterns** — Forward: expo/power, Reverse: elastic/bounce for satisfying return
+- **Toggle buttons** — Forward: quick ease-out, Reverse: bouncy ease for tactile feedback
+- **Menu systems** — Different personality on open vs close creates richer interaction language
+
 ## Performance Optimization {#performance}
 
 ### Critical Rules
@@ -658,23 +969,86 @@ useFrame(() => {
 });
 ```
 
-### Watercolor-Style Shaders
-*Source: Reddit - Susurrus watercolor world*
+### Non-Photorealistic Rendering (NPR) — Kuwahara Shader
+*Source: [Codrops - Susurrus: Crafting a Cozy Watercolor World](https://tympanus.net/codrops/2026/04/24/susurrus-crafting-a-cozy-watercolor-world-with-three-js-and-shaders/) (Apr 2026)*
 
-Fluid, organic shader effects using noise-based dissolve patterns:
+**The Kuwahara shader** transforms 3D scenes into watercolor paintings through intelligent pixel clustering and directional blur. Unlike simple blur effects, it preserves edges while creating fluid, painterly regions.
+
+**Core technique:** For each pixel, sample surrounding regions in multiple directions, calculate the variance in each region, then blend toward the region with lowest variance (most uniform color). This creates the characteristic "flow" of watercolor paint.
 
 ```glsl
-// Watercolor dissolve effect
-uniform float uDissolve;
-uniform sampler2D uNoiseTexture;
+// Simplified Kuwahara implementation
+uniform sampler2D uTexture;
+uniform float uKernel; // Blur kernel size
+uniform vec2 uResolution;
+
+vec4 kuwahara(sampler2D tex, vec2 uv, float kernel) {
+  vec2 pixel = 1.0 / uResolution;
+  
+  // Sample 4 regions around current pixel
+  vec4 regions[4];
+  float variances[4];
+  
+  // Top-left region
+  vec3 mean = vec3(0.0);
+  vec3 variance = vec3(0.0);
+  
+  for(int x = -int(kernel); x <= 0; x++) {
+    for(int y = -int(kernel); y <= 0; y++) {
+      vec3 col = texture2D(tex, uv + vec2(x, y) * pixel).rgb;
+      mean += col;
+      variance += col * col;
+    }
+  }
+  
+  float n = pow(kernel + 1.0, 2.0);
+  mean /= n;
+  variance = variance / n - mean * mean;
+  float totalVariance = variance.r + variance.g + variance.b;
+  
+  regions[0] = vec4(mean, totalVariance);
+  
+  // Repeat for other 3 regions (top-right, bottom-left, bottom-right)
+  // ... 
+  
+  // Find region with lowest variance
+  int bestRegion = 0;
+  for(int i = 1; i < 4; i++) {
+    if(regions[i].a < regions[bestRegion].a) {
+      bestRegion = i;
+    }
+  }
+  
+  return vec4(regions[bestRegion].rgb, 1.0);
+}
 
 void main() {
-  float noise = texture2D(uNoiseTexture, vUv * 3.0).r;
-  float dissolve = smoothstep(uDissolve - 0.1, uDissolve + 0.1, noise);
-  
-  vec3 color = mix(vec3(1.0, 0.8, 0.6), vec3(0.2, 0.4, 0.8), dissolve);
-  gl_FragColor = vec4(color, dissolve);
+  gl_FragColor = kuwahara(uTexture, vUv, 4.0);
 }
+```
+
+**Performance optimization:** The Kuwahara effect is expensive at full resolution. Always render to a reduced-size render target (half or quarter resolution) then composite back up. The painterly blur naturally hides the lower resolution.
+
+**Integration with Three.js postprocessing:**
+```tsx
+import { EffectComposer, RenderPass, ShaderPass } from 'three-stdlib';
+
+const kuwaharaPass = new ShaderPass({
+  uniforms: {
+    tDiffuse: { value: null },
+    uKernel: { value: 3.0 },
+    uResolution: { value: new Vector2(512, 512) } // Half-res for performance
+  },
+  vertexShader: /* standard fullscreen vertex */,
+  fragmentShader: /* kuwahara fragment above */
+});
+
+// Render pipeline: scene → half-res kuwahara → full-res composite
+composer.addPass(new RenderPass(scene, camera));
+composer.addPass(kuwaharaPass);
+```
+
+**Design applications:** Perfect for cozy, meditative, or storytelling experiences. Creates an instant "handmade" aesthetic that softens harsh digital edges while maintaining interactive responsiveness.
 ```
 
 ### Curved 3D Product Grids with Holographic Effects
