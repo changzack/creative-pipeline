@@ -25,15 +25,8 @@ If the approach says "halftone SVG filter on hero image" — there MUST be a vis
 - [ ] For each listed technique, verify it's in the code AND visible in the browser
 - [ ] If you can't implement a technique, document WHY and implement an alternative
 
-### 2. Use generated assets — they ARE the design
-You will receive pre-generated visual assets (textures, product shots, graphics) as hosted URLs. These are REAL designed images, not placeholders. They are the visual foundation of the build.
-
-**CRITICAL:** Use every generated asset. Embed them as `<img src="...">` or `background-image: url('...')`.
-- A build that ignores generated assets and uses CSS gradients instead = REJECTED
-- Grey placeholder boxes where a real texture/product shot was provided = REJECTED
-- The assets carry the design weight. Your HTML is the frame.
-
-If an asset URL fails to load, add `onerror` fallbacks with a styled placeholder (colored background + item name), not a broken image icon.
+### 2. Real images, not placeholders
+If product image URLs are provided, use them. If they fail to load, add `onerror` fallbacks with a styled placeholder (colored background + item name), not a broken image icon.
 
 ### 3. Static state must be the default
 The card should load showing its COMPLETED state — all 10 items visible, full hierarchy displayed. This is because:
@@ -82,16 +75,6 @@ Check for:
 - JS errors
 - CSS warnings about unsupported properties
 
-## Content Fidelity Rule (NON-NEGOTIABLE)
-
-**The moodboard is for VISUAL STYLE INSPIRATION only. The brief defines WHAT you are building.**
-
-You must build exactly the product described in the brief using the sample data provided. Do NOT copy content, product types, or data formats from moodboard images. If the brief says "ranked list of sneakers" with specific sneaker names in the Sample Data section, you build a ranked list of those exact sneakers — even if the moodboard shows music playlists, sports stats, or recipes.
-
-**This rule exists because:** In V3b, builders received a moodboard full of Spotify Wrapped screenshots and built Spotify Wrapped clones instead of the brief's sneaker ranking cards. The moodboard's visual content overwhelmed the brief's text instructions. Your job is to apply the moodboard's VISUAL TECHNIQUES to the brief's CONTENT.
-
-If you find yourself building something that doesn't match the brief's product/content, STOP and re-read the brief.
-
 ## Common Builder Failures (from past runs)
 
 These mistakes have been made before. Don't repeat them:
@@ -106,28 +89,6 @@ These mistakes have been made before. Don't repeat them:
 8. **Border-radius everywhere** — Check if the approach doc specifies sharp corners
 9. **Everything centered** — Check if the approach doc specifies left-alignment
 10. **Animation is just fade-ins** — The approach doc describes a narrative arc, implement it
-
-## Taste Calibration (from creative director rating 15 builds)
-
-**Results: 0 great, 6 acceptable, 9 bad.** Every build that looked like "AI slop" — clean, generic, soulless — was rated BAD. The acceptable ones had: creative ambition, novel visual techniques, 3D/depth, and felt HUMAN-made.
-
-### YOUR BUILD MUST NOT LOOK LIKE AN AI MADE IT.
-
-- Add imperfections: slightly off-grid elements, organic textures, hand-crafted feeling
-- Push visual techniques hard: SVG filters, blend modes, 3D transforms, generative noise
-- Depth and layering matter more than cleanliness
-- Think experimental graphic design poster, not tech product card
-- If you zoom out and it looks like "dark card + light text + fade-in animation" — you've failed
-
-### Creative Imperfection Mandate
-
-Perfect = boring. Real designers don't pixel-snap everything:
-- Slightly irregular spacing between elements (intentional, not broken)
-- Organic textures: noise overlays, grain, paper/film/concrete surfaces
-- Rough edges: CSS clip-path with slight irregularity, not perfect rectangles
-- Hand-crafted typography: different tracking per tier, not uniform
-- Visual tension: some elements tight, some breathing — NOT uniform padding everywhere
-- Material references: things that look like they were PRINTED, STAMPED, ETCHED, or PROJECTED — not rendered by CSS
 
 ## Quality Self-Check Before Saving
 

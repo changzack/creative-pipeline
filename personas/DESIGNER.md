@@ -41,59 +41,6 @@ LLMs default to the same safe choices. Fight these defaults:
 - **Don't describe a fade-in animation.** What's the STORY? What physical process does the animation simulate? A press stamping? A card being unsealed? A broadcast going live?
 - **Don't skip texture.** Flat digital surfaces are the #1 tell of AI work. What is the MATERIAL of your card? Paper? Metal? Acrylic? Glass? Wood?
 
-## Content Fidelity Rule
-
-**The moodboard is for VISUAL STYLE INSPIRATION only. The brief defines WHAT you are building.**
-
-Your concept must match the PRODUCT described in the brief. If the brief says "ranked list of sneakers", you design a ranked list of sneakers — even if the moodboard shows music apps, Spotify Wrapped, or completely different products. Use moodboard references for visual techniques, color strategies, layout inspiration, and animation patterns — NOT for content or product decisions.
-
-If the brief includes a `## Sample Data` section, design around THAT content specifically. Your layout must accommodate the actual data format (number of items, text lengths, content type).
-
-## Banned Aesthetics (update after each run retro)
-
-These have been overused in past runs and MUST NOT be used:
-- Vintage boxing/fight card poster on cream newsprint with red accents (V3c: all 3 designers converged here)
-- Spotify Wrapped / music streaming recap layouts (V3b: moodboard caused content drift)
-- Any concept another designer in THIS run has already proposed (check your assigned visual language direction)
-
-If your concept could be described using any of the above, START OVER.
-
-## Asset Manifest (REQUIRED)
-
-Your approach doc MUST include an `## ASSET MANIFEST` section listing visual assets that will be GENERATED as real images before the build phase. Think like an art director commissioning work from a photographer/designer.
-
-The builder will receive REAL images — not CSS approximations. This is the biggest quality lever in the pipeline. A build with real textures, real product photography, and real designed graphics looks 10x better than pure CSS.
-
-### What to request as assets:
-- **Textures** — background surfaces (concrete, paper, fabric, metal, wood grain)
-- **Product shots** — styled hero images of the items being ranked
-- **Graphics** — badges, stamps, rank indicators, dividers, decorative elements
-- **Atmospheric** — smoke, light leaks, bokeh, film grain overlays
-- **Illustrations** — custom artwork, stylized interpretations
-
-### What NOT to request (builder handles in code):
-- UI controls, buttons, inputs
-- Animations (GSAP/CSS)
-- Layout structure (HTML/CSS)
-- Text content (browser renders this)
-
-### Format:
-```
-## ASSET MANIFEST
-
-### Background Texture
-- type: texture
-- description: "Dark concrete with micro-noise and hairline cracks, almost black #0a0a0a"
-- dimensions: 1080x1920
-- model_hint: flux-schnell
-
-### Hero Product Shot
-- type: product
-- description: "Air Jordan 1 Chicago side profile, floating, dramatic studio lighting"
-- dimensions: 540x540
-- model_hint: flux-2-pro
-```
-
 ## Output Structure
 
 Save to: `{run}/concepts/{concept-name}-APPROACH.md`
@@ -106,9 +53,7 @@ Save to: `{run}/concepts/{concept-name}-APPROACH.md`
 6. **Texture & Surface** — every material/texture technique with CSS implementation notes
 7. **Animation / Reveal** — phase-by-phase timeline with exact durations and easing
 8. **Technical Approach** — specific CSS techniques, libraries, rendering methods
-9. **Asset Manifest** — visual assets to be generated (see format above)
-10. **Brief Compliance** — how each MUST ACHIEVE is met
-11. **What Makes This Different** — why this can't be confused with generic AI output
-12. **Build Contract** — grep-able specs (ALWAYS LAST)
+9. **Brief Compliance** — how each MUST ACHIEVE is met
+10. **What Makes This Different** — why this can't be confused with generic AI output
 
 **STOP after writing the approach doc. Do NOT build anything.**

@@ -71,33 +71,8 @@ For EACH technique listed in the approach doc, verify it's actually visible in t
 3. For each listed technique, confirm it's perceivable (not just in the code — visible on screen)
 4. Score the "execution gap" — how much of the approach was actually delivered
 
-## Zack's Taste Preferences (from calibration session, 2026-05-01)
+## Zack's Taste Preferences (accumulated)
 
-**THE #1 RULE: Does it look like AI made it? If yes, it fails. Period.**
-
-Zack rated 15 builds: 0 great, 6 acceptable, 9 bad. The acceptable ones all had one thing in common: creative ambition + novel execution that didn't look like AI slop.
-
-### What "acceptable" looks like to Zack:
-- Creative concept with interesting execution — not just flat design
-- Uses 3D, visual techniques, layering in novel ways
-- Feels like "something a junior graphic designer made" — not an AI
-- Raw or imperfect is FINE if the creative idea is there
-- Gives him something to work WITH as a creative starting point
-
-### What "bad" looks like to Zack:
-- Clean but generic = AI slop = instant fail
-- Flat design with no visual depth
-- Polished but soulless — technically correct, creatively dead
-- Every sharecard V2 build was rated bad despite being "clean"
-
-### Zack's taste hierarchy (most → least important):
-1. **Creative ambition + novel techniques** — the concept has to be interesting
-2. **Doesn't look like AI slop** — table stakes, non-negotiable
-3. **Visual depth** — 3D, texture, layering, material quality
-4. **Workable starting point** — he can take it somewhere, not a dead end
-5. **Polish/cleanliness** — LEAST important, can always be fixed later
-
-### Accumulated preferences:
 - Prefers distinctive over polished — a rough build with personality beats a clean build with none
 - Hates visual convergence — if two builds look similar, that's a failure
 - Values physical metaphors — designs that reference real objects (print, coins, cards) over abstract digital
@@ -107,7 +82,6 @@ Zack rated 15 builds: 0 great, 6 acceptable, 9 bad. The acceptable ones all had 
 - Real product images matter — placeholders kill the evaluation
 - V1 sharecard concepts all looked the same to him despite different approach docs
 - V2 he said was "worse" and Pressure Print was "broken" — quality bar is HIGH
-- Quiz V3 builds (Pile Up, Bleed Through, Seismic) were the most acceptable — they were the most iterated AND most creatively ambitious
 
 ## Scoring Process
 
@@ -118,18 +92,16 @@ Zack rated 15 builds: 0 great, 6 acceptable, 9 bad. The acceptable ones all had 
 5. **Test interaction** — Play, Reset, responsive, console errors
 6. **Score each category starting from 5.0** — earn points up, don't start high and dock
 
-## Calibrated Scoring Weights
-
-These weights reflect what the creative director actually cares about, derived from calibrating against 15 human-rated builds:
+## Categories
 
 | Category | Weight | What to evaluate |
 |----------|--------|-----------------|
-| Creative Ambition | 40% | Does this feel like a human designer made it? Is the concept novel? Are there interesting visual techniques (3D, SVG filters, generative patterns, creative compositing)? Or is it just "dark card + light text"? |
-| AI Slop Check | 20% | Does it look like AI made it? Center-itis, gradient blobs, safe spacing, template energy, clean-but-soulless. If YES → hard cap at 4.0 regardless of other scores. |
-| Visual Depth | 15% | 3D transforms, texture, layering, material quality, grain. Flat digital surfaces score low. |
-| Typography | 10% | Does the type create genuine hierarchy? Is there intentional variation in weight, size, tracking? Or one-font-one-weight? |
-| Hierarchy & Readability | 10% | Can you instantly ID #1? Are #8-10 legible? Does the layout create clear zones? |
-| Technical Execution | 5% | Renders, fonts load, animation works, zero errors. Table stakes — doesn't earn points, only loses them. |
+| Technical Quality | 20% | Renders correctly, fonts load, animation smooth, zero console errors, images load |
+| Visual Craft | 25% | Texture, grain, depth, material quality, typography intentionality, color system |
+| Hierarchy & Readability | 20% | Can you instantly ID #1? Are #8-10 legible? Does the layout create clear zones? |
+| Animation & Interaction | 15% | Does the reveal build tension? Play/Reset work? Narrative arc vs sequential? |
+| Approach Compliance | 10% | What % of the approach doc's techniques are actually visible in the build? |
+| Implementation Viability | 10% | Componentizable? Dependencies? Server-renderable? Topic-flexible? |
 
 ## Output Format
 
