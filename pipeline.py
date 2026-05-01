@@ -365,106 +365,180 @@ Save to: {run_dir}/builds/{concept_name}.html
     }
 
 
+def screenshot_builds(builds: list, run_name: str) -> list:
+    """Screenshot each build at 1080x1920 using Playwright."""
+    from playwright.sync_api import sync_playwright
+    
+    screenshots = []
+    screenshot_dir = RUNS_DIR / run_name / "screenshots"
+    screenshot_dir.mkdir(parents=True, exist_ok=True)
+    
+    with sync_playwright() as p:
+        browser = p.chromium.launch(headless=True)
+        
+        for b in builds:
+            build_path = Path(b["path"])
+            if not build_path.exists():
+                screenshots.append(None)
+                continue
+            
+            page = browser.new_page(viewport={"width": 1080, "height": 1920})
+            page.goto(f"file://{build_path.resolve()}", wait_until="networkidle")
+            page.wait_for_timeout(2000)  # Let fonts + animations settle
+            
+            screenshot_path = screenshot_dir / f"concept-{b['index']}.png"
+            page.screenshot(path=str(screenshot_path), full_page=False)
+            screenshots.append(str(screenshot_path))
+            
+            print(f"  📸 Screenshot: {screenshot_path.name}")
+            page.close()
+        
+        browser.close()
+    
+    return screenshots
+
+
+def encode_image(path: str) -> str:
+    """Read image and return base64 string."""
+    import base64
+    with open(path, "rb") as f:
+        return base64.standard_b64encode(f.read()).decode("utf-8")
+
+
 def pairwise_judge_node(state: PipelineState) -> dict:
-    """Phase 5: Bidirectional pairwise tournament."""
-    print(f"[JUDGE] Running pairwise tournament on {len(state['builds'])} builds")
+    """Phase 5: Vision-based bidirectional pairwise tournament."""
+    print(f"[JUDGE] Running vision-based pairwise tournament on {len(state['builds'])} builds")
     
     builds = state["builds"]
     if len(builds) < 2:
         return {"ranking": builds, "phase": "judge_complete"}
     
-    # Read build contents for comparison
-    build_contents = []
-    for b in builds:
-        path = Path(b["path"])
-        content = path.read_text()[:8000] if path.exists() else "BUILD MISSING"
-        build_contents.append(content)
+    # Screenshot all builds
+    print(f"[JUDGE] Screenshotting {len(builds)} builds at 1080×1920...")
+    screenshots = screenshot_builds(builds, state["name"])
     
     # Load reviewer persona
     persona_path = WORKSPACE / "skills/creative-technologist/personas/REVIEWER.md"
     persona = persona_path.read_text() if persona_path.exists() else ""
     
-    judge_prompt = """You are evaluating two creative artifacts.
+    # Use OpenAI as judge (cross-model — builders are Claude/Hermes)
+    judge_model = "gpt-4o"
+    
+    judge_system = f"""{persona}
 
-Brief: {brief}
+You are a harsh design critic evaluating two share card prototypes side by side.
+You're looking at SCREENSHOTS of the actual rendered output, not code.
 
-Artifact A ({model_a}):
-```html
-{a}
-```
+Judge on these criteria (in order of importance):
+1. FIRST IMPRESSION — Does it look like a premium artifact or a generic template? Would you stop scrolling?
+2. VISUAL DISTINCTION — Does it have a clear visual identity/metaphor, or could it be any dark-mode card?
+3. TYPOGRAPHY — Is the hierarchy intentional? Are fonts loaded and working? Sizes/weights create rhythm?
+4. TEXTURE & DEPTH — Is there grain, material quality, layering? Or is it flat colored divs?
+5. HIERARCHY — Can you instantly tell what's #1? Are #8-10 still legible?
+6. ANTI-PATTERNS — Flag any: generic gradients, glassmorphism, backdrop-blur, rounded-2xl on everything, 
+   AI-beige/purple palette, centered-everything, uniform spacing, shadcn-default energy
 
-Artifact B ({model_b}):
-```html
-{b}
-```
+IMPORTANT: Start skeptical. Most AI prototypes are mediocre. A "winner" of a mediocre pair is still mediocre.
+If both are bad, say so — but you MUST still pick the less-bad one.
 
-Evaluate:
-1. Visual impact — would someone stop scrolling?
-2. Typography quality — hierarchy, spacing, readability
-3. Technique ambition — does it attempt something distinctive?
-4. Anti-pattern check — any generic AI aesthetic (gradients, glassmorphism, rounded-2xl, shadcn defaults)?
-5. Approach compliance — does the build match what the approach doc promised?
-
-Which is better overall? Respond with EXACTLY one of: PREFER_A, PREFER_B, TIE
-Then explain in 2-3 sentences."""
+YOU MUST CHOOSE. Respond with EXACTLY one line first: PREFER_A or PREFER_B
+TIE is NOT allowed unless the artifacts are pixel-identical. There is always a less-bad option.
+Then explain in 3-5 sentences WHY, citing specific visual elements you see in the screenshots."""
 
     pairs = list(itertools.combinations(range(len(builds)), 2))
     wins = {i: 0 for i in range(len(builds))}
     results = []
     
     for i, j in pairs:
-        # Forward direction
-        fwd_response = anthropic_client.messages.create(
-            model="claude-opus-4-6",
-            max_tokens=500,
-            messages=[{"role": "user", "content": judge_prompt.format(
-                brief=state["brief"][:1000],
-                a=build_contents[i][:4000], b=build_contents[j][:4000],
-                model_a=builds[i].get("model", "?"), model_b=builds[j].get("model", "?"),
-            )}]
+        print(f"  ⚖️  Comparing concept {i} vs concept {j}...")
+        
+        img_i = encode_image(screenshots[i]) if screenshots[i] else None
+        img_j = encode_image(screenshots[j]) if screenshots[j] else None
+        
+        if not img_i or not img_j:
+            results.append({"pair": [i, j], "agreed": False, "winner": None, "error": "missing screenshot"})
+            continue
+        
+        # Forward direction: A=i, B=j
+        fwd_messages = [
+            {"role": "user", "content": [
+                {"type": "text", "text": f"Compare these two share card prototypes.\n\nBrief context: {state['brief'][:500]}\n\nImage 1 is ARTIFACT A. Image 2 is ARTIFACT B."},
+                {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{img_i}"}},
+                {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{img_j}"}},
+            ]}
+        ]
+        
+        fwd_response = openai_client.chat.completions.create(
+            model=judge_model,
+            max_tokens=600,
+            messages=[{"role": "system", "content": judge_system}] + fwd_messages,
         )
-        fwd_text = fwd_response.content[0].text
+        fwd_text = fwd_response.choices[0].message.content
         
-        # Reverse direction (swap A and B)
-        rev_response = anthropic_client.messages.create(
-            model="claude-opus-4-6",
-            max_tokens=500,
-            messages=[{"role": "user", "content": judge_prompt.format(
-                brief=state["brief"][:1000],
-                a=build_contents[j][:4000], b=build_contents[i][:4000],
-                model_a=builds[j].get("model", "?"), model_b=builds[i].get("model", "?"),
-            )}]
+        # Reverse direction: A=j, B=i (swap images)
+        rev_messages = [
+            {"role": "user", "content": [
+                {"type": "text", "text": f"Compare these two share card prototypes.\n\nBrief context: {state['brief'][:500]}\n\nImage 1 is ARTIFACT A. Image 2 is ARTIFACT B."},
+                {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{img_j}"}},
+                {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{img_i}"}},
+            ]}
+        ]
+        
+        rev_response = openai_client.chat.completions.create(
+            model=judge_model,
+            max_tokens=600,
+            messages=[{"role": "system", "content": judge_system}] + rev_messages,
         )
-        rev_text = rev_response.content[0].text
+        rev_text = rev_response.choices[0].message.content
         
-        # Bidirectional agreement check
-        fwd_winner = "A" if "PREFER_A" in fwd_text else ("B" if "PREFER_B" in fwd_text else "TIE")
-        rev_winner = "A" if "PREFER_A" in rev_text else ("B" if "PREFER_B" in rev_text else "TIE")
+        # Parse preferences
+        fwd_first_line = fwd_text.strip().split("\n")[0].upper()
+        rev_first_line = rev_text.strip().split("\n")[0].upper()
         
-        # In reverse, A and B are swapped, so PREFER_A in reverse = PREFER_B in forward
+        fwd_winner = "A" if "PREFER_A" in fwd_first_line else ("B" if "PREFER_B" in fwd_first_line else "TIE")
+        rev_winner = "A" if "PREFER_A" in rev_first_line else ("B" if "PREFER_B" in rev_first_line else "TIE")
+        
+        # Bidirectional agreement:
+        # Forward A=i wins AND Reverse B=i wins → i is genuinely preferred
         agreed = False
+        winner = None
         if fwd_winner == "A" and rev_winner == "B":
-            wins[i] += 1  # i wins in both directions
+            wins[i] += 1
             agreed = True
+            winner = i
         elif fwd_winner == "B" and rev_winner == "A":
-            wins[j] += 1  # j wins in both directions
+            wins[j] += 1
             agreed = True
-        # else: disagreement or tie — no winner
+            winner = j
         
         results.append({
             "pair": [i, j],
             "forward": fwd_winner,
             "reverse": rev_winner,
             "agreed": agreed,
-            "winner": i if (fwd_winner == "A" and rev_winner == "B") else (j if (fwd_winner == "B" and rev_winner == "A") else None),
-            "fwd_reasoning": fwd_text[-200:],
-            "rev_reasoning": rev_text[-200:],
+            "winner": winner,
+            "fwd_reasoning": fwd_text,
+            "rev_reasoning": rev_text,
         })
+        
+        status = "✓ agreed" if agreed else "⚠ disagreed"
+        winner_label = f"→ concept {winner}" if winner is not None else "→ tie"
+        print(f"    {status} {winner_label}")
     
     # Rank by wins
     ranking = sorted(wins.items(), key=lambda x: -x[1])
     ranked_builds = [{"rank": rank + 1, "build_index": idx, "wins": w, **builds[idx]} 
                      for rank, (idx, w) in enumerate(ranking)]
+    
+    # Save detailed results
+    results_path = RUNS_DIR / state["name"] / "reviews" / "pairwise-results.json"
+    results_path.parent.mkdir(parents=True, exist_ok=True)
+    import json as json_mod
+    results_path.write_text(json_mod.dumps({"pairs": results, "ranking": [{"rank": r["rank"], "index": r["build_index"], "wins": r["wins"]} for r in ranked_builds]}, indent=2))
+    
+    print(f"\n[JUDGE] Final ranking:")
+    for r in ranked_builds:
+        print(f"  #{r['rank']} — Concept {r['build_index']} ({r.get('model', '?')}) — {r['wins']} wins")
     
     return {
         "pairwise_results": results,
