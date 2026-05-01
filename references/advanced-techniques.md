@@ -791,6 +791,103 @@ const toggleMenu = () => {
 - **Toggle buttons** — Forward: quick ease-out, Reverse: bouncy ease for tactile feedback
 - **Menu systems** — Different personality on open vs close creates richer interaction language
 
+### GSAP Observer for Unified Input Handling
+
+*Source: [Codrops - More Than a Portfolio: Building a Scroll-Driven 3D World](https://tympanus.net/codrops/2026/04/28/more-than-a-portfolio-building-a-scroll-driven-3d-world-with-something-to-say/)*
+
+**GSAP Observer** unifies mouse, touch, and trackpad into one consistent scroll experience. Superior to raw scroll events for complex interactions.
+
+**The problem with raw scroll:**
+```tsx
+// Inconsistent behavior across devices
+window.addEventListener('scroll', handleScroll); // Mouse wheel
+window.addEventListener('touchmove', handleTouch); // Mobile
+// Different delta values, different timing, different feel
+```
+
+**Observer solution:**
+```tsx
+import { Observer } from "gsap/Observer";
+
+// Unified input handling
+Observer.create({
+  target: window,
+  type: "wheel,touch",
+  
+  onUp() {
+    // Previous section
+    gsap.to(camera.position, { y: currentSection * -4, duration: 1.2 });
+  },
+  
+  onDown() {
+    // Next section  
+    gsap.to(camera.position, { y: currentSection * -4, duration: 1.2 });
+  },
+  
+  // Fine-grained control for smooth scrolling
+  onChangeY: (self) => {
+    const velocity = self.velocityY;
+    // Apply velocity-based effects
+    material.uniforms.uVelocity.value = Math.abs(velocity * 0.05);
+  }
+});
+```
+
+**Advanced snap-scroll with Observer:**
+```tsx
+Observer.create({
+  target: window,
+  type: "wheel,touch,scroll",
+  
+  onStop: () => {
+    // Snap to nearest section when scrolling stops
+    const target = Math.round(scrollY / sectionHeight) * sectionHeight;
+    gsap.to(window, { 
+      scrollTo: target, 
+      duration: 1.2, 
+      ease: "power3.out" 
+    });
+  },
+  
+  tolerance: 10, // Prevent micro-movements from triggering
+  preventDefault: true, // Take full control
+});
+```
+
+**Scroll-mode switching mid-site:**
+```tsx
+// Different scroll behaviors per section
+const observers = {
+  freeScroll: Observer.create({
+    type: "wheel,touch",
+    onChangeY: (self) => {
+      // Smooth, continuous scrolling
+      window.scrollBy(0, -self.deltaY * 0.8);
+    }
+  }),
+  
+  snapScroll: Observer.create({
+    type: "wheel,touch", 
+    onUp: () => snapToPrevSection(),
+    onDown: () => snapToNextSection(),
+    tolerance: 50 // Higher threshold for intentional navigation
+  })
+};
+
+// Switch modes based on current section
+const updateScrollMode = (sectionType) => {
+  Object.values(observers).forEach(obs => obs.disable());
+  observers[sectionType].enable();
+};
+```
+
+**Why Observer > raw scroll:**
+- **Device unification** — One API for mouse, trackpad, touch
+- **Velocity tracking** — Built-in deltaY/velocityY for advanced effects
+- **Normalized values** — Consistent behavior across hardware
+- **Better mobile support** — Handles momentum scrolling properly
+- **State management** — onStart/onStop for scroll state changes
+
 ## Performance Optimization {#performance}
 
 ### Critical Rules
@@ -817,6 +914,78 @@ const toggleMenu = () => {
    - Use `LOD` (Level of Detail) for complex models
    - Dispose of materials/geometries on unmount
    - Target 60fps — use `useFrame` wisely, avoid allocations in render loop
+
+### Advanced Performance Patterns (2026)
+
+*Source: [Codrops - More Than a Portfolio: Building a Scroll-Driven 3D World](https://tympanus.net/codrops/2026/04/28/more-than-a-portfolio-building-a-scroll-driven-3d-world-with-something-to-say/)*
+
+6. **KTX2 / Basis Universal compression** — Standard JPGs/PNGs are brutal on GPU memory. Moving to KTX2 (decompressed directly on the GPU) was the difference between crawling on mid-range hardware and smooth performance:
+```tsx
+import { KTX2Loader } from 'three/examples/jsm/loaders/KTX2Loader.js';
+
+const ktx2Loader = new KTX2Loader();
+ktx2Loader.setTranscoderPath('/basis/');
+ktx2Loader.detectSupport(renderer);
+
+// Load KTX2 textures for dramatic memory savings
+const texture = await ktx2Loader.loadAsync('/textures/diffuse.ktx2');
+```
+
+7. **GPU instancing for massive draw call reduction** — Floating blocks, architectural pillars, debris fields should never be individual draw calls. Instancing collapses them into one (difference between 30 FPS and 144):
+```tsx
+const geometry = new THREE.BoxGeometry();
+const material = new THREE.MeshStandardMaterial();
+const instancedMesh = new THREE.InstancedMesh(geometry, material, 1000);
+
+// Position each instance
+const matrix = new THREE.Matrix4();
+for (let i = 0; i < 1000; i++) {
+  matrix.makeTranslation(
+    (Math.random() - 0.5) * 100,
+    (Math.random() - 0.5) * 100,
+    (Math.random() - 0.5) * 100
+  );
+  instancedMesh.setMatrixAt(i, matrix);
+}
+instancedMesh.instanceMatrix.needsUpdate = true;
+```
+
+8. **Dynamic culling vs static LODs** — Because scroll-driven sites have camera-pathed movement, you know exactly what's on-screen at any frame. Rather than building multiple LOD tiers (which bloats memory), aggressively cull anything outside the camera frustum:
+```tsx
+useFrame(({ camera }) => {
+  const frustum = new THREE.Frustum();
+  const matrix = new THREE.Matrix4().multiplyMatrices(
+    camera.projectionMatrix, 
+    camera.matrixWorldInverse
+  );
+  frustum.setFromProjectionMatrix(matrix);
+  
+  // Only update objects actually visible to the camera
+  objects.forEach(obj => {
+    obj.visible = frustum.intersectsObject(obj);
+    if (obj.visible) {
+      obj.update(); // Only compute what's actually seen
+    }
+  });
+});
+```
+
+9. **Low-resolution shaders for mobile performance** — Atmospheric passes don't need full resolution. Run them on smaller render targets and composite back:
+```tsx
+// Half-resolution render target for expensive effects
+const halfResTarget = new THREE.WebGLRenderTarget(
+  window.innerWidth * 0.5,
+  window.innerHeight * 0.5
+);
+
+// Render expensive effect at half-res
+renderer.setRenderTarget(halfResTarget);
+renderer.render(atmosphereScene, camera);
+
+// Composite back to full-res
+renderer.setRenderTarget(null);
+renderer.render(mainScene, camera);
+```
 
 6. **Image optimization**:
    - Use Next/Image with proper sizing and formats (WebP/AVIF)
@@ -974,7 +1143,22 @@ useFrame(() => {
 
 **The Kuwahara shader** transforms 3D scenes into watercolor paintings through intelligent pixel clustering and directional blur. Unlike simple blur effects, it preserves edges while creating fluid, painterly regions.
 
+**Key insight from production:** Start with the Kuwahara shader as the first step — even before finishing 3D models. This allows early visual effect tuning and avoids unexpected shader results later in development.
+
 **Core technique:** For each pixel, sample surrounding regions in multiple directions, calculate the variance in each region, then blend toward the region with lowest variance (most uniform color). This creates the characteristic "flow" of watercolor paint.
+
+**Lightweight implementation approach:** The full Kuwahara can be simplified for web performance. Skip TensorPass complexity and focus on a streamlined vertex-stage approach:
+
+```glsl
+// Simplified vertex shader (skips full MVP matrices for performance)
+varying vec2 vUv;
+
+void main() {
+  vUv = uv;
+  // Direct NDC positioning — faster when camera isn't animated close
+  gl_Position = vec4(position, 1.0);
+}
+```
 
 ```glsl
 // Simplified Kuwahara implementation
@@ -1049,7 +1233,110 @@ composer.addPass(kuwaharaPass);
 ```
 
 **Design applications:** Perfect for cozy, meditative, or storytelling experiences. Creates an instant "handmade" aesthetic that softens harsh digital edges while maintaining interactive responsiveness.
+
+### NDC Bypass for 2D Overlays
+
+*Source: [Codrops - More Than a Portfolio: Building a Scroll-Driven 3D World](https://tympanus.net/codrops/2026/04/28/more-than-a-portfolio-building-a-scroll-driven-3d-world-with-something-to-say/)*
+
+**The problem:** Full-screen 2D overlays (contact menus, loading screens, modal transitions) in Three.js scenes normally get projected through the camera, which wastes GPU cycles fighting the 3D pipeline for 2D behavior.
+
+**The solution:** Write directly to Normalized Device Coordinates (NDC), bypassing projection entirely:
+
+```glsl
+// Vertex shader - skip camera projection for screen-aligned quads
+varying vec2 vUv;
+
+void main() {
+  vUv = uv;
+  
+  // ✨ NDC MAGIC: Ignore projectionMatrix and modelViewMatrix
+  // Position vertices directly on the 2D screen
+  gl_Position = vec4(position.xy, 0.0, 1.0);
+}
 ```
+
+**Fragment shader with organic expansion:**
+```glsl
+// Fragment shader for ink-bleed transition
+uniform float uHover;    // 0-1 idle breathing
+uniform float uClick;    // 0-1 expansion progress
+uniform vec2 uMouse;     // Expansion center
+uniform float uTime;
+
+float fbm(vec2 p) {
+  float f = 0.0;
+  f += 0.5000 * noise(p); p = p * 2.02;
+  f += 0.2500 * noise(p); p = p * 2.03;
+  f += 0.1250 * noise(p);
+  return f;
+}
+
+void main() {
+  vec2 center = uMouse;
+  float dist = distance(vUv, center);
+  
+  // Base expansion radius
+  float radius = (uHover * 0.45) + (uClick * 4.5);
+  
+  // ✨ ORGANIC MAGIC: Dynamic noise amplitude
+  // At rest: subtle breathing. On click: splash-like expansion
+  float noise = fbm(vUv * 4.0 - uTime * 0.4);
+  float dynamicNoise = noise * (0.8 + uClick * 1.5);
+  
+  // ✨ DYNAMIC SOFTENING: Sharp when idle, soft when expanding
+  float softness = 1.2 + (uClick * 1.0);
+  float edge = dist + dynamicNoise;
+  
+  float alpha = 1.0 - smoothstep(radius - softness, radius, edge);
+  
+  gl_FragColor = vec4(0.0, 0.0, 0.0, alpha);
+}
+```
+
+**React Three Fiber implementation:**
+```tsx
+const ContactOverlay = ({ isExpanding }) => {
+  const materialRef = useRef();
+  const { mouse } = useThree();
+  
+  useFrame(({ clock }) => {
+    if (materialRef.current) {
+      materialRef.current.uniforms.uTime.value = clock.elapsedTime;
+      materialRef.current.uniforms.uMouse.value.set(
+        (mouse.x + 1) * 0.5,  // Convert to 0-1
+        (mouse.y + 1) * 0.5
+      );
+    }
+  });
+  
+  return (
+    <mesh>
+      <planeGeometry args={[2, 2]} />
+      <shaderMaterial
+        ref={materialRef}
+        uniforms={{
+          uHover: { value: 0 },
+          uClick: { value: 0 },
+          uMouse: { value: new Vector2(0.5, 0.5) },
+          uTime: { value: 0 }
+        }}
+        vertexShader={ndcVertexShader}
+        fragmentShader={inkBleedFragmentShader}
+        transparent
+        depthTest={false}
+      />
+    </mesh>
+  );
+};
+```
+
+**Key benefits:**
+- **Performance** — No camera projection calculations for 2D elements
+- **Predictability** — Overlay stays pinned to screen regardless of 3D camera movement
+- **Organic feel** — Noise-based expansion feels hand-drawn, not geometric
+- **Dynamic properties** — Different behaviors for idle vs active states
+
+**Use cases:** Contact forms, navigation menus, modal transitions, loading overlays, any full-screen 2D UI that lives "above" a 3D scene.
 
 ### Curved 3D Product Grids with Holographic Effects
 *Source: [Codrops - From Flat to Spatial](https://tympanus.net/codrops/2026/02/24/from-flat-to-spatial-creating-a-3d-product-grid-with-react-three-fiber/) (Feb 2026)*
