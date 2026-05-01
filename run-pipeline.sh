@@ -24,9 +24,9 @@ LOG_FILE="$LOG_DIR/$RUN_NAME.log"
 if [[ "$1" == "status" ]]; then
     # Status is quick — run inline
     source "$VENV"
-    export ANTHROPIC_API_KEY="${ANTHROPIC_API_KEY:?Set ANTHROPIC_API_KEY}"
-    export OPENAI_API_KEY="${OPENAI_API_KEY:?Set OPENAI_API_KEY}"
-    export GOOGLE_API_KEY="${GOOGLE_API_KEY:?Set GOOGLE_API_KEY}"
+    export ANTHROPIC_API_KEY="${ANTHROPIC_API_KEY}"
+    export OPENAI_API_KEY="${OPENAI_API_KEY}"
+    export GOOGLE_API_KEY="${GOOGLE_API_KEY}"
     cd "$SCRIPT_DIR"
     python3 pipeline.py "$@"
     exit $?
@@ -41,9 +41,9 @@ RUNNER="/tmp/pipeline-runs/$RUN_NAME.runner.sh"
 cat > "$RUNNER" << RUNNER_EOF
 #!/bin/bash
 source "$VENV"
-export ANTHROPIC_API_KEY="${ANTHROPIC_API_KEY:?Set ANTHROPIC_API_KEY}"
-export OPENAI_API_KEY="${OPENAI_API_KEY:?Set OPENAI_API_KEY}"
-export GOOGLE_API_KEY="${GOOGLE_API_KEY:?Set GOOGLE_API_KEY}"
+export ANTHROPIC_API_KEY="${ANTHROPIC_API_KEY}"
+export OPENAI_API_KEY="${OPENAI_API_KEY}"
+export GOOGLE_API_KEY="${GOOGLE_API_KEY}"
 export PYTHONUNBUFFERED=1
 cd "$SCRIPT_DIR"
 python3 pipeline.py $@ >> "$LOG_FILE" 2>&1
