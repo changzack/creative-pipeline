@@ -46,6 +46,47 @@ openai_client = OpenAI()
 MAX_COST_USD = 20.0
 MAX_ITERATIONS = 3
 
+# Cost per 1M tokens (approximate, 2026 pricing)
+COST_PER_1M = {
+    "claude-opus-4-6": {"input": 15.0, "output": 75.0},
+    "gpt-4o": {"input": 2.5, "output": 10.0},
+    "gpt-4o-mini": {"input": 0.15, "output": 0.6},
+    "gemini-2.5-pro": {"input": 1.25, "output": 10.0},
+}
+
+# Run-level cost accumulator
+_run_costs = {"total_usd": 0.0, "by_phase": {}, "calls": []}
+
+def track_cost(model: str, input_tokens: int, output_tokens: int, phase: str = "unknown"):
+    """Track cost of an API call."""
+    rates = COST_PER_1M.get(model, {"input": 5.0, "output": 15.0})
+    cost = (input_tokens / 1_000_000 * rates["input"]) + (output_tokens / 1_000_000 * rates["output"])
+    _run_costs["total_usd"] += cost
+    _run_costs["by_phase"][phase] = _run_costs["by_phase"].get(phase, 0.0) + cost
+    _run_costs["calls"].append({
+        "model": model, "input": input_tokens, "output": output_tokens,
+        "cost": round(cost, 4), "phase": phase, "time": time.strftime("%H:%M:%S"),
+    })
+    if _run_costs["total_usd"] > MAX_COST_USD * 0.8:
+        print(f"  ⚠️  Cost alert: ${_run_costs['total_usd']:.2f} / ${MAX_COST_USD:.2f} (80% threshold)")
+    if _run_costs["total_usd"] > MAX_COST_USD:
+        raise RuntimeError(f"Budget exceeded: ${_run_costs['total_usd']:.2f} > ${MAX_COST_USD:.2f}")
+    return cost
+
+
+def save_cost_report(run_name: str):
+    """Save cost breakdown to run directory."""
+    report_path = RUNS_DIR / run_name / "cost-report.json"
+    report_path.parent.mkdir(parents=True, exist_ok=True)
+    import json as jm
+    _run_costs["total_usd"] = round(_run_costs["total_usd"], 4)
+    for k in _run_costs["by_phase"]:
+        _run_costs["by_phase"][k] = round(_run_costs["by_phase"][k], 4)
+    report_path.write_text(jm.dumps(_run_costs, indent=2))
+    print(f"\n💰 Total cost: ${_run_costs['total_usd']:.2f}")
+    for phase, cost in sorted(_run_costs["by_phase"].items()):
+        print(f"   {phase}: ${cost:.4f}")
+
 
 # ── State Schema ────────────────────────────────────────────────
 class PipelineState(TypedDict):
@@ -301,6 +342,8 @@ def approach_gate_node(state: PipelineState) -> dict:
     )
     
     gate_text = msg.content[0].text
+    if msg.usage:
+        track_cost("claude-opus-4-6", msg.usage.input_tokens, msg.usage.output_tokens, "approach_gate")
     
     return {
         "gate_result": {"raw": gate_text, "passed": "all_pass\": true" in gate_text.lower() or "\"all_pass\": true" in gate_text},
@@ -474,6 +517,8 @@ Then explain in 3-5 sentences WHY, citing specific visual elements you see in th
             messages=[{"role": "system", "content": judge_system}] + fwd_messages,
         )
         fwd_text = fwd_response.choices[0].message.content
+        if fwd_response.usage:
+            track_cost(judge_model, fwd_response.usage.prompt_tokens, fwd_response.usage.completion_tokens, "judge")
         
         # Reverse direction: A=j, B=i (swap images)
         rev_messages = [
@@ -490,6 +535,8 @@ Then explain in 3-5 sentences WHY, citing specific visual elements you see in th
             messages=[{"role": "system", "content": judge_system}] + rev_messages,
         )
         rev_text = rev_response.choices[0].message.content
+        if rev_response.usage:
+            track_cost(judge_model, rev_response.usage.prompt_tokens, rev_response.usage.completion_tokens, "judge")
         
         # Parse preferences
         fwd_first_line = fwd_text.strip().split("\n")[0].upper()
@@ -565,6 +612,9 @@ def human_gate_node(state: PipelineState) -> Command:
     
     print(f"\nBuilds at: {RUNS_DIR / state['name'] / 'builds'}")
     print(f"{'='*60}\n")
+    
+    # Save cost report before pausing
+    save_cost_report(state["name"])
     
     # This pauses the pipeline until resumed
     decision = interrupt({
