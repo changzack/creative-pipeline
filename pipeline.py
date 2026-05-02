@@ -53,6 +53,7 @@ MAX_ITERATIONS = 3
 COST_PER_1M = {
     "claude-opus-4-6": {"input": 15.0, "output": 75.0},
     "gpt-4o": {"input": 2.5, "output": 10.0},
+    "gpt-4.1": {"input": 2.0, "output": 8.0},
     "gpt-4o-mini": {"input": 0.15, "output": 0.6},
     "gemini-2.5-pro": {"input": 1.25, "output": 10.0},
 }
@@ -862,7 +863,7 @@ NOTE: Convergence has already been checked mechanically. Focus ONLY on:
 
 def fan_out_builders(state: PipelineState) -> list:
     """Fan out to 3 parallel builder nodes, each with a different model assignment."""
-    model_assignments = ["claude-opus", "gpt-4o", "gemini-2.5-pro"]
+    model_assignments = ["claude-opus", "gpt-4.1", "gemini-2.5-pro"]
     builders = []
     for i in range(len(state["approaches"])):
         model = model_assignments[i % len(model_assignments)]
@@ -880,7 +881,7 @@ def build_direct_api(model: str, prompt: str, output_path: Path, run_name: str) 
         if model.startswith("gpt"):
             response = openai_client.chat.completions.create(
                 model=model,
-                max_tokens=16000,
+                max_tokens=32000,
                 messages=[{"role": "user", "content": prompt + "\n\nRespond with ONLY the complete HTML file content. No markdown fences, no explanation. Start with <!DOCTYPE html>."}],
             )
             html = response.choices[0].message.content
@@ -890,10 +891,10 @@ def build_direct_api(model: str, prompt: str, output_path: Path, run_name: str) 
         elif model.startswith("gemini"):
             import google.generativeai as genai
             genai.configure(api_key=os.environ.get("GOOGLE_API_KEY", ""))
-            gmodel = genai.GenerativeModel("gemini-2.5-pro-preview-05-06")
+            gmodel = genai.GenerativeModel("gemini-2.5-pro")
             response = gmodel.generate_content(
                 prompt + "\n\nRespond with ONLY the complete HTML file content. No markdown fences, no explanation. Start with <!DOCTYPE html>.",
-                generation_config=genai.types.GenerationConfig(max_output_tokens=16000),
+                generation_config=genai.types.GenerationConfig(max_output_tokens=32000),
             )
             html = response.text
             # Gemini usage tracking
