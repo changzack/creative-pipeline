@@ -686,8 +686,69 @@ NOTE: Convergence has already been checked mechanically. Focus ONLY on:
 
 
 def fan_out_builders(state: PipelineState) -> list:
-    """Fan out to 3 parallel builder nodes."""
-    return [Send("builder", {**state, "build_index": i}) for i in range(len(state["approaches"]))]
+    """Fan out to 3 parallel builder nodes, each with a different model assignment."""
+    model_assignments = ["claude-opus", "gpt-4o", "gemini-2.5-pro"]
+    builders = []
+    for i in range(len(state["approaches"])):
+        model = model_assignments[i % len(model_assignments)]
+        builders.append(Send("builder", {**state, "build_index": i, "builder_model": model}))
+    return builders
+
+
+def build_direct_api(model: str, prompt: str, output_path: Path, run_name: str) -> dict:
+    """Build HTML via direct API call (no Hermes). Returns status dict.
+    Used for GPT and Gemini builders that don't need tool use."""
+    
+    print(f"    [direct-api] Calling {model}...")
+    
+    try:
+        if model.startswith("gpt"):
+            response = openai_client.chat.completions.create(
+                model=model,
+                max_tokens=16000,
+                messages=[{"role": "user", "content": prompt + "\n\nRespond with ONLY the complete HTML file content. No markdown fences, no explanation. Start with <!DOCTYPE html>."}],
+            )
+            html = response.choices[0].message.content
+            if response.usage:
+                track_cost(model, response.usage.prompt_tokens, response.usage.completion_tokens, "builder")
+                
+        elif model.startswith("gemini"):
+            import google.generativeai as genai
+            genai.configure(api_key=os.environ.get("GOOGLE_API_KEY", ""))
+            gmodel = genai.GenerativeModel("gemini-2.5-pro-preview-05-06")
+            response = gmodel.generate_content(
+                prompt + "\n\nRespond with ONLY the complete HTML file content. No markdown fences, no explanation. Start with <!DOCTYPE html>.",
+                generation_config=genai.types.GenerationConfig(max_output_tokens=16000),
+            )
+            html = response.text
+            # Gemini usage tracking
+            if hasattr(response, 'usage_metadata'):
+                track_cost("gemini-2.5-pro",
+                    getattr(response.usage_metadata, 'prompt_token_count', 0),
+                    getattr(response.usage_metadata, 'candidates_token_count', 0),
+                    "builder")
+        else:
+            # Default to Hermes
+            return {"status": "unsupported_model"}
+        
+        # Clean response — strip markdown fences if present
+        html = html.strip()
+        if html.startswith("```html"):
+            html = html[7:]
+        if html.startswith("```"):
+            html = html[3:]
+        if html.endswith("```"):
+            html = html[:-3]
+        html = html.strip()
+        
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        output_path.write_text(html)
+        print(f"    [direct-api] Wrote {len(html)} bytes to {output_path.name}")
+        return {"status": "done"}
+        
+    except Exception as e:
+        print(f"    [direct-api] Error: {type(e).__name__}: {e}")
+        return {"status": "failed", "error": str(e)}
 
 
 def builder_node(state: dict) -> dict:
@@ -695,8 +756,9 @@ def builder_node(state: dict) -> dict:
     idx = state["build_index"]
     approach = state["approaches"][idx]
     run_dir = RUNS_DIR / state["name"]
+    builder_model = state.get("builder_model", "claude-opus")
     
-    print(f"[BUILDER {idx}] Building from designer {approach['designer_id']} approach")
+    print(f"[BUILDER {idx}] Building from designer {approach['designer_id']} approach (model: {builder_model})")
     
     # Load persistent builder persona
     persona_path = WORKSPACE / "skills/creative-technologist/personas/BUILDER.md"
@@ -715,6 +777,19 @@ def builder_node(state: dict) -> dict:
     
     # Load proven code recipes for implementation guidance
     recipes = load_reference("recipes.md", max_chars=6000)
+    
+    # 4.5C: Identify moodboard images for builder reference
+    moodboard_dir = run_dir / "moodboard"
+    moodboard_images = sorted(moodboard_dir.glob("*.png"))[:3] if moodboard_dir.exists() else []
+    moodboard_ref = ""
+    if moodboard_images:
+        moodboard_ref = f"""
+## REFERENCE IMAGES (study these — your build should feel like it belongs in this visual family)
+The following moodboard images are at: {moodboard_dir}
+"""
+        for img in moodboard_images:
+            moodboard_ref += f"- {img.name}\n"
+        moodboard_ref += "\nOpen and study these images before building. They represent the quality bar and aesthetic direction.\n"
     
     task = f"""{persona}
 
@@ -740,6 +815,7 @@ If verification fails, your build is rejected and you must redo it.
 
 ## CODE RECIPES (proven implementations — adapt these, don't reinvent)
 {recipes if recipes else "(No recipes available)"}
+{moodboard_ref}
 
 ---
 
@@ -769,9 +845,15 @@ Before writing the file, verify:
 Save to: {run_dir}/builds/{concept_name}.html
 """
     
-    result = run_hermes(f"{state['name']}-builder-{idx}", task, max_time=1800, max_turns=50)
-    
     build_path = run_dir / f"builds/{concept_name}.html"
+    
+    # Route to appropriate builder based on model
+    if builder_model.startswith("gpt") or builder_model.startswith("gemini"):
+        # Direct API — model generates HTML directly
+        result = build_direct_api(builder_model, task, build_path, state["name"])
+    else:
+        # Hermes (Claude) — agent with tool use
+        result = run_hermes(f"{state['name']}-builder-{idx}", task, max_time=1800, max_turns=50)
     
     # Spec compliance check (grep-based, no LLM cost)
     compliance = {"pass": True, "failures": [], "warnings": [], "checks": 0}
@@ -815,6 +897,64 @@ Save the fixed file to: {build_path}
         if compliance["warnings"]:
             for w in compliance["warnings"]:
                 print(f"     ⚡ {w}")
+    
+    # ── 4.5B: Build → Screenshot → Self-Review (one round) ──
+    if build_path.exists():
+        print(f"  📸 Builder {idx}: screenshotting for self-review...")
+        try:
+            from playwright.sync_api import sync_playwright
+            review_screenshot = run_dir / f"builds/{concept_name}-review.png"
+            
+            with sync_playwright() as p:
+                browser = p.chromium.launch(headless=True)
+                page = browser.new_page(viewport={"width": 1080, "height": 1920})
+                page.goto(f"file://{build_path.resolve()}", wait_until="networkidle")
+                page.wait_for_timeout(2000)
+                page.screenshot(path=str(review_screenshot), full_page=False)
+                page.close()
+                browser.close()
+            
+            if review_screenshot.exists():
+                import base64
+                with open(review_screenshot, "rb") as img_f:
+                    screenshot_b64 = base64.standard_b64encode(img_f.read()).decode("utf-8")
+                
+                # Send screenshot to builder for self-review via vision API
+                print(f"  🔍 Builder {idx}: self-reviewing against approach doc...")
+                review_response = openai_client.chat.completions.create(
+                    model="gpt-4o",
+                    max_tokens=1000,
+                    messages=[
+                        {"role": "system", "content": "You are reviewing a build's screenshot against its design spec. List ONLY concrete visual issues — things that are wrong, missing, or broken. Be specific: 'the #1 item text is cut off at the right edge' not 'typography could be improved'. If it looks good, say LOOKS_GOOD."},
+                        {"role": "user", "content": [
+                            {"type": "text", "text": f"Compare this screenshot to the BUILD CONTRACT below. List visual issues.\n\n## BUILD CONTRACT\n{build_contract[:2000]}"},
+                            {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{screenshot_b64}"}},
+                        ]}
+                    ],
+                )
+                review_text = review_response.choices[0].message.content
+                if review_response.usage:
+                    track_cost("gpt-4o", review_response.usage.prompt_tokens, review_response.usage.completion_tokens, "self_review")
+                
+                if "LOOKS_GOOD" not in review_text.upper():
+                    print(f"  🔄 Builder {idx}: visual issues found, sending fix...")
+                    # Save review for debugging
+                    (run_dir / f"reviews/self-review-{idx}.md").write_text(review_text)
+                    
+                    fix_prompt = f"""Your build at {build_path} has visual issues identified from a screenshot review:
+
+{review_text}
+
+Fix these visual issues in the existing file. Do not change fonts, colors, or layout structure — only fix rendering bugs and visual problems.
+
+Save the fixed file to: {build_path}
+"""
+                    run_hermes(f"{state['name']}-builder-{idx}-visual-fix", fix_prompt, max_time=600, max_turns=20)
+                    print(f"  ✅ Builder {idx}: visual fix applied")
+                else:
+                    print(f"  ✅ Builder {idx}: self-review passed — LOOKS_GOOD")
+        except Exception as e:
+            print(f"  ⚠️  Builder {idx}: self-review skipped ({type(e).__name__}: {e})")
     
     return {
         "builds": [{
