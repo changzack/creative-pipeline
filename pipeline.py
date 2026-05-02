@@ -637,6 +637,18 @@ def designer_node(state: dict) -> dict:
 
 {('## Past Run Learnings (what worked and what failed in previous runs)' + chr(10) + past_learnings) if past_learnings else ''}
 
+## CRITICAL TASTE CALIBRATION (from creative director, 2026-05-01)
+The creative director rated 15 past builds: **0 great, 6 acceptable, 9 bad.**
+The #1 failure mode is "AI slop" — clean, polished, soulless output. Every build that looked like an AI made it was rated BAD.
+The acceptable builds all had: creative ambition, novel visual techniques, 3D/depth/layering, and felt like a human designer made them.
+
+**Your job is NOT to make something clean. Your job is to make something INTERESTING.**
+- Push for novel techniques: 3D CSS, WebGL, SVG filters, generative patterns, creative compositing
+- A rough but creative concept >>> a polished but generic one
+- Think like an experimental graphic designer, not an AI assistant
+- The output should look like a junior designer's ambitious portfolio piece, NOT an AI prototype
+- If your concept could be described as "dark card with light text and some animation" — START OVER, it's not ambitious enough
+
 ## Your Task
 Write an approach doc for a creative concept based on this brief. Your approach doc has TWO parts:
 1. **Creative Narrative** — your concept, references, and rationale (for humans to read)
@@ -957,6 +969,18 @@ The following moodboard images are at: {moodboard_dir}
     
     task = f"""{persona}
 
+## CRITICAL TASTE CALIBRATION
+The creative director rated 15 past builds: **0 great, 6 acceptable, 9 bad.**
+Every build that looked like "AI slop" — clean, generic, soulless — was rated BAD.
+The acceptable ones had: creative ambition, novel visual techniques, 3D/depth, and felt HUMAN-made.
+
+**YOUR BUILD MUST NOT LOOK LIKE AN AI MADE IT.**
+- Add imperfections: slightly off-grid elements, organic textures, hand-crafted feeling
+- Push visual techniques hard: SVG filters, blend modes, 3D transforms, generative noise
+- Depth and layering matter more than cleanliness
+- Think experimental graphic design poster, not tech product card
+- If you zoom out and it looks like "dark card + light text + fade-in animation" — you've failed
+
 ## Your Task
 Build a complete, working HTML prototype. You have two inputs:
 1. A Creative Narrative (context for understanding the concept)
@@ -1203,17 +1227,21 @@ def pairwise_judge_node(state: PipelineState) -> dict:
     
     judge_system = f"""{persona}
 
-You are a harsh design critic evaluating two share card prototypes side by side.
+You are a harsh design critic evaluating two prototypes side by side.
 You're looking at SCREENSHOTS of the actual rendered output, not code.
 
-Judge on these criteria (in order of importance):
-1. FIRST IMPRESSION — Does it look like a premium artifact or a generic template? Would you stop scrolling?
-2. VISUAL DISTINCTION — Does it have a clear visual identity/metaphor, or could it be any dark-mode card?
-3. TYPOGRAPHY — Is the hierarchy intentional? Are fonts loaded and working? Sizes/weights create rhythm?
-4. TEXTURE & DEPTH — Is there grain, material quality, layering? Or is it flat colored divs?
-5. HIERARCHY — Can you instantly tell what's #1? Are #8-10 still legible?
-6. ANTI-PATTERNS — Flag any: generic gradients, glassmorphism, backdrop-blur, rounded-2xl on everything, 
-   AI-beige/purple palette, centered-everything, uniform spacing, shadcn-default energy
+## CALIBRATED TASTE (from creative director rating 15 builds — 0 great, 6 acceptable, 9 bad)
+The #1 failure mode is "AI slop" — clean, polished, soulless output that looks like an AI made it.
+Builds that looked like AI = BAD. Builds with creative ambition + novel techniques = acceptable.
+A rough but interesting build >>> a clean but generic one.
+
+Judge on these criteria (in order of importance — creative ambition is 40%):
+1. CREATIVE AMBITION (40%) — Does this feel like a human designer made it? Is the concept novel? Are there interesting visual techniques (3D, SVG filters, generative patterns, creative compositing)? Or is it just "dark card + light text"?
+2. AI SLOP CHECK (20%) — Does it look like AI generated it? Signs: perfect spacing, generic gradients, glassmorphism, centered-everything, uniform padding, shadcn energy, dark card with white text and nothing else. If yes, it FAILS regardless of other qualities.
+3. VISUAL DEPTH (15%) — Texture, grain, layering, material quality. Flat colored divs = bad. Depth and dimension = good.
+4. TYPOGRAPHY (10%) — Is the hierarchy intentional? Fonts loaded? Real rhythm vs just size differences?
+5. HIERARCHY (10%) — Can you instantly tell what's #1? Legibility of lower items?
+6. TECHNICAL EXECUTION (5%) — Renders correctly, animation works. This is LEAST important — a broken but ambitious build beats a working but boring one.
 
 IMPORTANT: Start skeptical. Most AI prototypes are mediocre. A "winner" of a mediocre pair is still mediocre.
 If both are bad, say so — but you MUST still pick the less-bad one.
