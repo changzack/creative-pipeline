@@ -126,6 +126,144 @@ class PipelineState(TypedDict):
     completed_at: Optional[str]
 
 
+# ── Cross-Run Learning (Phase 6) ────────────────────────────────
+MEMORY_DIR = PIPELINE_DIR / "memory"
+TECHNIQUES_FILE = MEMORY_DIR / "techniques.json"
+
+def load_technique_registry() -> dict:
+    """Load the technique registry from disk."""
+    if TECHNIQUES_FILE.exists():
+        return json.loads(TECHNIQUES_FILE.read_text())
+    return {"_schema": "pipeline.techniques.v1", "techniques": [], "verdicts": []}
+
+
+def save_technique_registry(registry: dict):
+    """Save the technique registry to disk."""
+    MEMORY_DIR.mkdir(parents=True, exist_ok=True)
+    TECHNIQUES_FILE.write_text(json.dumps(registry, indent=2))
+
+
+def record_verdict(run_name: str, decision: str, feedback: str,
+                   ranking: list, builds: list, approaches: list):
+    """Record a human verdict. ONLY called after human decision, never from automated review.
+    This is the ONLY write path to the technique registry."""
+    registry = load_technique_registry()
+    
+    verdict = {
+        "run": run_name,
+        "decision": decision,  # approve / iterate / reject
+        "feedback": feedback,
+        "date": time.strftime("%Y-%m-%d %H:%M"),
+        "ranking": [{"index": r.get("build_index", r.get("index")), "wins": r.get("wins", 0)} for r in ranking[:3]],
+    }
+    registry["verdicts"].append(verdict)
+    
+    # Extract technique learnings from the verdict
+    for build in builds:
+        idx = build.get("index", 0)
+        approach_content = ""
+        for a in approaches:
+            if a.get("designer_id") == build.get("designer_id"):
+                approach_content = a.get("content", "")
+                break
+        
+        contract = extract_build_contract(approach_content)
+        fonts = extract_fonts_from_contract(contract)
+        techniques = extract_techniques_from_contract(contract)
+        
+        # Was this build in the winner position?
+        rank = None
+        for r in ranking:
+            if r.get("build_index") == idx or r.get("index") == idx:
+                rank = r.get("rank", None)
+                break
+        
+        # Record technique outcomes
+        for tech in techniques:
+            entry = {
+                "technique": tech["name"],
+                "css": tech.get("css_check", ""),
+                "run": run_name,
+                "rank": rank,
+                "verdict": decision,
+                "model": build.get("model", "unknown"),
+                "date": time.strftime("%Y-%m-%d"),
+            }
+            registry["techniques"].append(entry)
+    
+    # If there's specific feedback, record it as a learning
+    if feedback:
+        registry.setdefault("learnings", []).append({
+            "run": run_name,
+            "feedback": feedback,
+            "decision": decision,
+            "date": time.strftime("%Y-%m-%d"),
+        })
+    
+    save_technique_registry(registry)
+    print(f"  📝 Recorded verdict: {decision} ({len(registry['techniques'])} techniques, {len(registry['verdicts'])} verdicts)")
+
+
+def get_relevant_learnings(brief: str, max_items: int = 10) -> str:
+    """Pull relevant learnings from past runs to inject into prompts.
+    Simple keyword matching — upgrade to embeddings later if needed."""
+    registry = load_technique_registry()
+    
+    if not registry.get("verdicts") and not registry.get("learnings"):
+        return ""
+    
+    output_parts = []
+    
+    # Recent verdicts with feedback
+    recent_verdicts = registry.get("verdicts", [])[-5:]
+    if recent_verdicts:
+        output_parts.append("## Learnings from Past Runs")
+        for v in recent_verdicts:
+            if v.get("feedback"):
+                emoji = "✅" if v["decision"] == "approve" else "❌" if v["decision"] == "reject" else "🔄"
+                output_parts.append(f"- {emoji} Run `{v['run']}` ({v['decision']}): {v['feedback'][:200]}")
+    
+    # Technique outcomes — what worked vs didn't
+    techniques = registry.get("techniques", [])
+    if techniques:
+        # Group by technique name
+        tech_stats = {}
+        for t in techniques:
+            name = t["technique"]
+            if name not in tech_stats:
+                tech_stats[name] = {"approved": 0, "rejected": 0, "total": 0, "best_rank": 99}
+            tech_stats[name]["total"] += 1
+            if t.get("verdict") == "approve":
+                tech_stats[name]["approved"] += 1
+            elif t.get("verdict") == "reject":
+                tech_stats[name]["rejected"] += 1
+            if t.get("rank") and t["rank"] < tech_stats[name]["best_rank"]:
+                tech_stats[name]["best_rank"] = t["rank"]
+        
+        # Surface techniques with clear signal
+        winners = [(n, s) for n, s in tech_stats.items() if s["approved"] > 0]
+        losers = [(n, s) for n, s in tech_stats.items() if s["rejected"] > 0 and s["approved"] == 0]
+        
+        if winners:
+            output_parts.append("\n## Techniques That Worked")
+            for name, stats in winners[:5]:
+                output_parts.append(f"- ✅ **{name}** — approved {stats['approved']}x, best rank #{stats['best_rank']}")
+        
+        if losers:
+            output_parts.append("\n## Techniques That Failed")
+            for name, stats in losers[:5]:
+                output_parts.append(f"- ❌ **{name}** — rejected {stats['rejected']}x, never approved")
+    
+    # Explicit learnings
+    learnings = registry.get("learnings", [])[-5:]
+    if learnings:
+        output_parts.append("\n## Explicit Feedback")
+        for l in learnings:
+            output_parts.append(f"- {l['feedback'][:200]}")
+    
+    return "\n".join(output_parts) if output_parts else ""
+
+
 # ── Knowledge Layer ─────────────────────────────────────────────
 REFERENCES_DIR = WORKSPACE / "skills/creative-technologist/references"
 
@@ -385,6 +523,7 @@ def research_node(state: PipelineState) -> dict:
     # Load knowledge layer for research quality
     rubric = load_reference("art-direction-rubric.md", max_chars=4000)
     patterns = load_reference("creative-patterns.md", max_chars=3000)
+    past_learnings = get_relevant_learnings(state["brief"])
     
     task = f"""You are a design researcher. Read the creative brief below and conduct visual research.
 
@@ -409,6 +548,8 @@ def research_node(state: PipelineState) -> dict:
 ## Output
 Save your research to: {run_dir}/VISUAL-RESEARCH.md
 Save reference images to: {run_dir}/moodboard/
+
+{('## Past Run Learnings (avoid repeating mistakes)' + chr(10) + past_learnings) if past_learnings else ''}
 
 In VISUAL-RESEARCH.md, include for each reference:
 - URL and screenshot filename
@@ -477,6 +618,7 @@ def designer_node(state: dict) -> dict:
     tactics = load_reference("enhancement-tactics.md", max_chars=5000)
     techniques_index = load_reference("advanced-techniques.md", max_chars=4000)
     contract_template = load_reference("design-contract-template.md")
+    past_learnings = get_relevant_learnings(state["brief"])
     
     task = f"""{persona}
 
@@ -485,6 +627,8 @@ def designer_node(state: dict) -> dict:
 
 ## Advanced Techniques Reference (technique index — reference by name in your contract)
 {techniques_index if techniques_index else ""}
+
+{('## Past Run Learnings (what worked and what failed in previous runs)' + chr(10) + past_learnings) if past_learnings else ''}
 
 ## Your Task
 Write an approach doc for a creative concept based on this brief. Your approach doc has TWO parts:
@@ -1190,6 +1334,16 @@ def human_gate_node(state: PipelineState) -> Command:
     
     human_decision = decision.get("decision", "reject") if isinstance(decision, dict) else str(decision)
     human_feedback = decision.get("feedback", "") if isinstance(decision, dict) else ""
+    
+    # Record verdict to technique registry (cross-run learning)
+    record_verdict(
+        run_name=state["name"],
+        decision=human_decision,
+        feedback=human_feedback,
+        ranking=state.get("ranking", []),
+        builds=state.get("builds", []),
+        approaches=state.get("approaches", []),
+    )
     
     if human_decision == "approve":
         return Command(goto="deploy", update={
