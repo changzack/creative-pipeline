@@ -1,7 +1,8 @@
 # Pipeline V3 Build Plan
 **Created:** 2026-04-30
-**Status:** Planning
-**Source:** Claude Deep Research v3 field report + V1/V2 retros
+**Updated:** 2026-05-01
+**Status:** Phases 1-2 complete, Phase 4 partially done
+**Source:** Claude Deep Research v3 field report + V1/V2 retros + smoke test forensics
 
 ---
 
@@ -20,43 +21,43 @@
 
 ---
 
-## Phase 1: Fix the Spine (Days 1-3)
+## Phase 1: Fix the Spine (Days 1-3) ✅ COMPLETE
 **Goal:** Pipeline state survives crashes. No more cron polling.
 
-- [ ] Install LangGraph + dependencies (`pip install langgraph langgraph-checkpoint-sqlite langchain-anthropic`)
-- [ ] Create `pipeline.py` — port existing phases as graph nodes
-- [ ] Wrap current Hermes spawns in node functions (don't rewrite agents yet)
-- [ ] `Send()` API for parallel fan-out (3 designers, 3 builders)
-- [ ] SQLite checkpointer for durable state
-- [ ] `interrupt()` for human taste gate (replaces cron hack)
-- [ ] Basic CLI to invoke/resume pipeline (`python pipeline.py run/resume`)
+- [x] Install LangGraph + dependencies
+- [x] Create `pipeline.py` — 8-node LangGraph StateGraph (~24KB)
+- [x] Wrap Hermes spawns in node functions
+- [x] `Send()` API for parallel fan-out (3 designers, 3 builders)
+- [x] SQLite checkpointer for durable state
+- [x] `interrupt()` for human taste gate
+- [x] Basic CLI (`python pipeline.py run/resume/status`)
+- [x] Process survival: `nohup` + runner script + `start_new_session=True`
+- [x] Smoke test: full pipeline ran overnight (research → designers → gate → builders → judge → human_gate)
 - [ ] Install LangGraph Studio desktop app for debugging
-- [ ] Test: crash mid-run, resume from checkpoint
 
-**Kills:** Orchestrator amnesia, phase skipping, cron polling, lost state on compaction
-
-**Definition of done:** Can start a pipeline, kill the process mid-build, restart, and it resumes from the correct node.
+**Lessons:**
+- OpenClaw exec sessions SIGTERM all child processes — even disowned. Must use nohup with external runner script.
+- `start_new_session=True` on Popen is critical for Hermes subprocess survival.
+- LangGraph `interrupt()` returns a tuple in stream events, not a dict — need isinstance check.
 
 ---
 
-## Phase 2: Fix the Evaluator (Days 3-5)
+## Phase 2: Fix the Evaluator (Days 3-5) ✅ COMPLETE
 **Goal:** Scores match Zack's judgment.
 
-- [ ] Implement bidirectional pairwise tournament (code from research report)
-- [ ] Screenshot builds via browser automation (Puppeteer or Playwright)
-- [ ] Send screenshots + brief + moodboard + approach docs to vision-capable judge
-- [ ] Use **cross-model judging** — if builders use Claude, judge with Gemini (or vice versa)
-- [ ] Anti-pattern checklist in judge prompt:
-  - No gradients/glassmorphism/backdrop-blur/rounded-2xl
-  - No default shadcn components
-  - No AI-beige color palettes
-  - No generic SaaS hero sections
-- [ ] Position bias control: randomize A/B ordering, run both directions
-- [ ] Output: ranked list with win counts + per-comparison justifications
+- [x] Implement bidirectional pairwise tournament
+- [x] Screenshot builds via Playwright (headless Chromium, 1080×1920)
+- [x] Send screenshots to vision-capable judge (GPT-4o)
+- [x] Cross-model judging: builders=Claude, judge=GPT-4o
+- [x] Anti-pattern checklist in judge prompt
+- [x] Position bias control: both directions, only count agreed winners
+- [x] Forced preference (no TIE allowed — dramatically reduces cop-outs)
+- [x] Output: ranked list with win counts + per-comparison justifications + reasoning
+- [x] Results saved to `reviews/pairwise-results.json`
 
-**Kills:** Score inflation, sycophantic confirmation, reviewer hallucinating 7.0 on bad work
-
-**Definition of done:** Pairwise judge produces a ranking of 3 builds with justifications. No 1-10 scores anywhere.
+**Lessons:**
+- Allowing TIE → judge defaults to diplomatic TIE. Forced preference works much better.
+- Vision-based judging (screenshots) is essential — code comparison alone can't catch rendering bugs.
 
 ---
 
@@ -78,7 +79,7 @@
 
 ---
 
-## Phase 4: Observability + Dashboard (Days 6-8)
+## Phase 4: Observability + Dashboard (Days 6-8) 🔄 PARTIAL
 **Goal:** Know what things cost. See pipeline state visually. Human gate in browser.
 
 ### Langfuse Setup
@@ -88,38 +89,66 @@
 - [ ] Tag traces by pipeline run + phase
 
 ### Cost Controls
-- [ ] Token-budget circuit breaker class (hard cap per run ~$20)
-- [ ] Alert at 80% of budget
-- [ ] Max iteration cap on creative loop (default: 3)
+- [x] Token-budget circuit breaker (hard cap $20/run, alert at 80%)
+- [x] Per-call token counting with phase breakdown
+- [x] Cost rates for Claude Opus, GPT-4o, Gemini 2.5 Pro
+- [x] `save_cost_report()` writes JSON to run directory
+- [ ] Max iteration cap on creative loop (default: 3) — in state, not enforced
 - [ ] Model version pinning (no floating aliases)
 
 ### Pipeline Dashboard (Custom)
-- [ ] Design the dashboard layout:
-  ```
-  ┌────────────────────────────────────────────────┐
-  │  Run: [name]          Phase: [current]  ⏸/$cost│
-  ├──────────┬──────────┬──────────────────────────┤
-  │ Concept A│ Concept B│ Concept C                │
-  │ [screenshot] [screenshot] [screenshot]         │
-  │ Model: X │ Model: Y │ Model: Z                 │
-  │ Rank: #2 │ Rank: #1 │ Rank: #3                 │
-  ├──────────┴──────────┴──────────────────────────┤
-  │ Pairwise: B>A ✓  B>C ✓  A>C ⚠️ (tie)          │
-  │ Cost: $X.XX │ Time: Xmin │ Iteration: N        │
-  ├────────────────────────────────────────────────┤
-  │ [✅ Approve] [🔄 Iterate + notes] [❌ Reject]  │
-  │ Iteration notes: [text field]                  │
-  └────────────────────────────────────────────────┘
-  ```
-- [ ] Build as static HTML + light API backend
-- [ ] Reads from: LangGraph SQLite (state), Langfuse API (cost), build URLs (screenshots)
-- [ ] Approve/iterate/reject buttons write back to LangGraph via `Command(resume=...)`
-- [ ] Deploy via here-now
-- [ ] Human gate = opening this URL in browser
+- [x] `generate-dashboard.py` — static HTML generator from run directory
+- [x] Per-run detail view: embedded screenshots, pairwise results, approach docs, moodboard
+- [x] Multi-project index view (`--index`): scans all runs, thumbnail cards, stats footer
+- [x] Dark theme, gold/silver/bronze rank badges, responsive
+- [x] Deployed to here-now
+- [ ] Approve/iterate/reject buttons (currently read-only; decisions via Telegram)
 
 **Kills:** Flying blind on cost, no debugging traces, taste gate buried in Telegram messages
 
-**Definition of done:** Dashboard URL shows current run state + builds + scores. Can approve/reject from browser. Langfuse shows cost per phase.
+**Definition of done:** ~~Dashboard URL shows current run state + builds + scores. Can approve/reject from browser. Langfuse shows cost per phase.~~ Partial: dashboard shows state + builds + scores. Approve/reject still via Telegram. Langfuse not yet set up.
+
+---
+
+## Phase 4.5: Builder Fidelity (NEW — from smoke test forensics)
+**Goal:** Builders produce output that matches their spec, not a generic default.
+
+### Problem Diagnosed (May 1, 2026)
+Smoke test forensic analysis revealed: approach docs are genuinely different (different fonts, colors, layout specs) but Builder 1 used Builder 0's fonts AND colors instead of its own spec. The model's aesthetic prior overwhelms spec differences when running the same model 3x.
+
+Three compounding issues:
+1. **Spec drift** — builder ignores its own approach doc's concrete specs (fonts, colors) and defaults to a "safe" aesthetic basin
+2. **Blind building** — builder writes HTML without ever seeing the rendered result
+3. **No compliance verification** — no automated check that the build matches the spec
+
+### Fixes (ordered by implementation priority)
+
+#### A. Automated Spec Compliance Gate (cheap, no LLM needed)
+- [ ] After build completes, programmatically extract from the approach doc:
+  - Required font families (grep for Google Fonts names)
+  - Required hex colors (top 3-5 from palette table)
+  - Required CSS techniques (e.g., "halftone", "obi-strip", specific class names)
+- [ ] Grep the built HTML for each requirement
+- [ ] If compliance < 80% (e.g., wrong fonts, missing colors), **fail the build and re-run** with explicit error: "Your spec says Oswald but you used Bebas Neue. Fix it."
+- [ ] Max 2 compliance retries before escalating
+
+#### B. Build → Screenshot → Self-Review Loop
+- [ ] After initial build, Playwright screenshots at 1080×1920
+- [ ] Send screenshot + approach doc back to the builder: "Here's what your code renders. Compare to your approach doc. Fix any discrepancies."
+- [ ] One round of self-review (not a loop — diminishing returns after round 1)
+- [ ] Track: what changed between build v1 and v2
+
+#### C. Moodboard injection to builder
+- [ ] Pass 2-3 moodboard reference images (base64, compressed) to the builder alongside the approach doc
+- [ ] "Here's what the designer was looking at when they wrote this spec. Your output should feel like it belongs in this visual family."
+- [ ] Only pass images if builder's model supports vision (Claude, GPT-4o, Gemini all do)
+
+### Key Insight
+The problem is NOT prompt quality — the approach docs contain exact hex codes, font names, pixel sizes. The problem is the builder model's prior overwhelming explicit instructions when running the same model 3x. Fix A catches this mechanically. Fix B catches rendering bugs. Fix C grounds the builder in visual context.
+
+**Kills:** "Specs are different but builds look the same", rendering bugs, spec drift
+
+**Definition of done:** Each build uses the fonts and colors from its own approach doc (verified programmatically). At least one round of visual self-review before judge.
 
 ---
 
@@ -127,9 +156,10 @@
 **Goal:** Three builds that actually look different.
 
 - [ ] Wire three model families into builder nodes:
-  - Builder A: Claude Opus
-  - Builder B: GPT-5 (need OpenAI API key)
-  - Builder C: Gemini 2.5 Pro (have API key)
+  - Builder A: Claude Opus (direct API)
+  - Builder B: GPT-5 / GPT-4o (OpenAI API — have key)
+  - Builder C: Gemini 2.5 Pro (Google API — have key)
+- [ ] Each model calls its own API directly (not all through Hermes/Opus)
 - [ ] Per-branch constraint files with:
   - **Era/reference constraints** (e.g., "Swiss modernist 1960s", "Y2K Frutiger Aero", "Brutalist web 2018")
   - **Anti-pattern exclusion lists** (explicit things NOT to do)
@@ -137,10 +167,11 @@
 - [ ] Formalize DESIGN.md per project (replaces per-persona files)
 - [ ] Pass moodboard images to vision-capable builders as reference grounding
 - [ ] Run a test: same brief, 3 models, verify visible diversity
+- [ ] Combined with Phase 4.5: spec compliance gate catches same-model drift, multi-model prevents aesthetic basin convergence
 
 **Kills:** "Three independent concepts that look the same"
 
-**Definition of done:** 3 builds from 3 different models are visually distinguishable without reading labels.
+**Definition of done:** 3 builds from 3 different models are visually distinguishable without reading labels. Each build's fonts/colors match its spec (Phase 4.5 gate passes).
 
 ---
 
@@ -229,3 +260,4 @@
 | Date | Change |
 |---|---|
 | 2026-04-30 | Initial plan created from Deep Research v3 findings |
+| 2026-05-01 | Phases 1-2 marked complete. Phase 4 partially done (cost tracking + dashboard). Added Phase 4.5 (Builder Fidelity) from smoke test forensics: spec compliance gate, build→screenshot→self-review loop, moodboard injection. Updated Phase 5 to use direct multi-model API calls instead of all-through-Hermes. |
