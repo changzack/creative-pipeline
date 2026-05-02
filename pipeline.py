@@ -532,6 +532,19 @@ def research_node(state: PipelineState) -> dict:
     
     task = f"""You are a design researcher. Read the creative brief below and conduct visual research.
 
+## DIVERSITY MANDATE
+Your moodboard must include references from AT LEAST 3 of these categories:
+1. 3D/spatial design (isometric, perspective, depth layers)
+2. Data visualization / infographics (charts, radial layouts, node networks)
+3. Kinetic typography / motion design (text animation, morphing, glitch)
+4. Editorial / magazine layout (grids, asymmetry, bold typography)
+5. Experimental web (generative art, creative coding, interactive)
+
+DO NOT fill the moodboard with only one aesthetic direction.
+DO NOT include vintage boxing posters, fight cards, or newspaper broadsheets — these have been overused in past runs.
+DO NOT include Spotify Wrapped or music streaming recap designs.
+Prioritize DIVERSE visual languages over cohesive mood.
+
 ## Brief
 {state['brief']}
 
@@ -589,20 +602,20 @@ def fan_out_designers(state: PipelineState) -> list:
         {
             "designer_id": 0,
             "model": "claude-opus",
-            "era": "Choose your own era/reference. Do NOT default to modern web aesthetics.",
-            "anti_patterns": "No gradients, no glassmorphism, no backdrop-blur, no rounded corners > 4px, no shadcn defaults.",
+            "era": "Your concept must use 3D/SPATIAL techniques as its primary visual language. Think: CSS 3D transforms, isometric perspective, parallax depth layers, perspective grids, stacked planes in Z-space. The card should feel like it has PHYSICAL DEPTH — objects at different distances from the viewer. Do NOT make a flat 2D layout. Do NOT default to vintage/retro aesthetics.",
+            "anti_patterns": "No flat layouts, no vintage/retro/newspaper aesthetics, no fight card metaphors, no boxing references, no cream/newsprint backgrounds, no gradients, no glassmorphism, no backdrop-blur, no rounded corners > 4px.",
         },
         {
             "designer_id": 1,
             "model": "gpt-5",
-            "era": "Choose your own era/reference. Do NOT default to modern web aesthetics.",
-            "anti_patterns": "No centered layouts, no hero sections, no card grids, no Tailwind defaults, no AI-beige.",
+            "era": "Your concept must use DATA VISUALIZATION or INFOGRAPHIC techniques as its primary visual language. Think: charts, graphs, radial layouts, node networks, treemaps, bubble plots, connected-dot rankings, heat maps. The ranked list should be presented through a visual system that ENCODES the ranking in the visual structure itself — not just numbered text. Do NOT make a standard list layout. Do NOT default to vintage/retro aesthetics.",
+            "anti_patterns": "No numbered lists, no vintage/retro/newspaper aesthetics, no fight card metaphors, no boxing references, no cream/newsprint backgrounds, no centered layouts, no hero sections, no card grids, no Tailwind defaults.",
         },
         {
             "designer_id": 2,
             "model": "gemini",
-            "era": "Choose your own era/reference. Do NOT default to modern web aesthetics.",
-            "anti_patterns": "No soft shadows, no floating elements, no pastel palettes, no generic sans-serif, no template energy.",
+            "era": "Your concept must use KINETIC TYPOGRAPHY and MOTION as its primary visual language. Think: text that moves, morphs, splits, glitches, or transforms. Rank transitions through typographic animation. Characters that rearrange. Words that shatter and reform. The card should feel ALIVE and MOVING even in a static screenshot. Do NOT make a static list. Do NOT default to vintage/retro aesthetics.",
+            "anti_patterns": "No static layouts, no vintage/retro/newspaper aesthetics, no fight card metaphors, no boxing references, no cream/newsprint backgrounds, no soft shadows, no floating elements, no pastel palettes, no generic sans-serif, no template energy.",
         },
     ]
     
@@ -821,23 +834,38 @@ def approach_gate_node(state: PipelineState) -> dict:
     msg = anthropic_client.messages.create(
         model="claude-opus-4-6",
         max_tokens=2000,
-        messages=[{"role": "user", "content": f"""You are reviewing 3 creative approach docs for quality and ambition.
+        messages=[{"role": "user", "content": f"""You are a creative director reviewing 3 approach docs. You must be HARSH and CRITICAL.
 
-NOTE: Convergence has already been checked mechanically. Focus ONLY on:
-1. AMBITION: Does any approach feel conservative or generic? Would a creative director be excited or bored?
-2. COMPLIANCE: Does each approach address the brief's requirements?
-3. TECHNIQUE QUALITY: Are the specified CSS techniques ambitious and achievable?
+## CHECK 1: CONCEPTUAL CONVERGENCE (most important!)
+Mechanical font/color checks already passed. But concepts can converge at a HIGHER level.
+Compare the core METAPHOR and VISUAL LANGUAGE of each approach:
+- Do 2+ approaches use the same conceptual metaphor? (e.g., all doing "vintage fight card", all doing "newspaper", all doing "receipt")
+- Do 2+ approaches use the same visual era/aesthetic? (e.g., all doing 1920s vintage, all doing brutalist, all doing vaporwave)
+- Do 2+ approaches have essentially the same layout structure? (e.g., all big-item-top + stacked-list-bottom)
+If ANY two concepts share a metaphor, aesthetic era, OR layout structure — that's convergence. Flag it.
+
+## CHECK 2: AMBITION
+Would a creative director at a top agency be excited by this? Or would they say "I've seen this before"?
+- If ANY approach could be described as "standard ranked list with nice typography" — it's not ambitious enough
+- Novel visual techniques (3D CSS, SVG filters, generative art, creative compositing) are good signals
+- Playing it safe is a FAIL
+
+## CHECK 3: COMPLIANCE
+Does each approach address the brief's actual product and content?
 
 ## Approaches
 {approaches_text}
 
 ## Output (JSON):
 {{
+  "conceptual_convergence": ["designer X and Y both use the same [metaphor/era/layout]: ..."],
   "ambition_flags": ["designer X is too safe because..."],
   "compliance_issues": ["designer X doesn't address..."],
   "all_pass": true/false,
   "notes": "..."
 }}
+
+IMPORTANT: If 2+ concepts share the same metaphor/aesthetic, all_pass MUST be false.
 """}]
     )
     
@@ -845,10 +873,17 @@ NOTE: Convergence has already been checked mechanically. Focus ONLY on:
     if msg.usage:
         track_cost("claude-opus-4-6", msg.usage.input_tokens, msg.usage.output_tokens, "approach_gate")
     
+    llm_passed = "all_pass\": true" in gate_text.lower() or "\"all_pass\": true" in gate_text
+    has_conceptual_convergence = "conceptual_convergence\": [\"" in gate_text or "conceptual_convergence\": [\n" in gate_text
+    
+    if has_conceptual_convergence and not llm_passed:
+        print(f"  ⚠️  CONCEPTUAL CONVERGENCE DETECTED BY LLM — gate FAILED")
+        print(f"     LLM reasoning: {gate_text[:500]}")
+    
     out = {
         "gate_result": {
             "raw": gate_text,
-            "passed": "all_pass\": true" in gate_text.lower() or "\"all_pass\": true" in gate_text,
+            "passed": llm_passed and not has_conceptual_convergence,
             "convergence_issues": convergence_issues,
             "missing_contracts": missing_contracts,
         },
