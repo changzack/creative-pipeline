@@ -126,6 +126,192 @@ class PipelineState(TypedDict):
     completed_at: Optional[str]
 
 
+# ── Knowledge Layer ─────────────────────────────────────────────
+REFERENCES_DIR = WORKSPACE / "skills/creative-technologist/references"
+
+def load_reference(filename: str, max_chars: Optional[int] = None, section: Optional[str] = None) -> str:
+    """Load a reference doc from the skills directory.
+    Respects context budget with max_chars truncation.
+    Can extract a specific section by heading."""
+    path = REFERENCES_DIR / filename
+    if not path.exists():
+        print(f"  ⚠️  Reference missing: {filename}")
+        return ""
+    content = path.read_text()
+    if section:
+        if section in content:
+            start = content.index(section)
+            next_heading = content.find("\n## ", start + len(section))
+            content = content[start:next_heading] if next_heading > 0 else content[start:]
+        else:
+            print(f"  ⚠️  Section '{section}' not found in {filename}")
+    if max_chars:
+        content = content[:max_chars]
+    return content
+
+
+def extract_build_contract(approach_content: str) -> str:
+    """Extract the BUILD CONTRACT section from an approach doc."""
+    # Try multiple heading variations
+    for marker in ["## BUILD CONTRACT", "## DESIGN CONTRACT", "## Non-Negotiables"]:
+        if marker in approach_content:
+            return approach_content.split(marker, 1)[1]
+    return ""
+
+
+def extract_fonts_from_contract(contract: str) -> dict:
+    """Extract required and forbidden fonts from a build contract."""
+    import re
+    result = {"required": [], "forbidden": []}
+    
+    lines = contract.split("\n")
+    in_required = False
+    in_forbidden = False
+    
+    for line in lines:
+        lower = line.lower().strip()
+        if "required font" in lower:
+            in_required = True
+            in_forbidden = False
+            continue
+        elif "forbidden font" in lower:
+            in_forbidden = True
+            in_required = False
+            continue
+        elif lower.startswith("###"):
+            in_required = False
+            in_forbidden = False
+            continue
+        
+        # Extract font names from font-family declarations or plain text
+        font_matches = re.findall(r"'([^']+)'", line)
+        if not font_matches:
+            # Try comma-separated list: "Bebas Neue, IBM Plex Mono"
+            if in_forbidden and "," in line:
+                font_matches = [f.strip() for f in line.split(",") if f.strip() and len(f.strip()) > 2]
+            elif in_forbidden and line.strip().startswith("- "):
+                name = line.strip().lstrip("- ").strip()
+                if name and len(name) > 2 and not name.startswith("#"):
+                    font_matches = [name]
+        
+        if in_required:
+            result["required"].extend(font_matches)
+        elif in_forbidden:
+            result["forbidden"].extend(font_matches)
+    
+    return result
+
+
+def extract_colors_from_contract(contract: str) -> dict:
+    """Extract required and forbidden colors from a build contract."""
+    import re
+    result = {"required": [], "forbidden": []}
+    
+    lines = contract.split("\n")
+    in_required = False
+    in_forbidden = False
+    
+    for line in lines:
+        lower = line.lower().strip()
+        if "required color" in lower:
+            in_required = True
+            in_forbidden = False
+            continue
+        elif "must not contain" in lower or "forbidden color" in lower:
+            in_forbidden = True
+            in_required = False
+        elif lower.startswith("###") and "color" not in lower:
+            in_required = False
+            in_forbidden = False
+            continue
+        
+        # Extract hex colors
+        colors = re.findall(r"#[0-9a-fA-F]{6}", line)
+        if in_required or (not in_forbidden and "BACKGROUND" in line or "PRIMARY" in line or "ACCENT" in line or "SECONDARY" in line):
+            result["required"].extend(colors)
+        if in_forbidden or "must not" in lower or "Must NOT" in line:
+            result["forbidden"].extend(colors)
+    
+    return result
+
+
+def extract_techniques_from_contract(contract: str) -> list:
+    """Extract required CSS techniques with their grep-able implementation hints."""
+    import re
+    techniques = []
+    lines = contract.split("\n")
+    in_techniques = False
+    
+    for line in lines:
+        lower = line.lower().strip()
+        if "required css" in lower or "required technique" in lower:
+            in_techniques = True
+            continue
+        elif lower.startswith("###"):
+            in_techniques = False
+            continue
+        
+        if in_techniques and line.strip().startswith("- ") or in_techniques and line.strip().startswith("| "):
+            # Extract the CSS property hint (inside backticks or after colon)
+            css_hints = re.findall(r"`([^`]+)`", line)
+            name = line.strip().lstrip("- |").split(":")[0].split("|")[0].strip()
+            if css_hints:
+                techniques.append({"name": name, "css_check": css_hints[0]})
+            elif name:
+                techniques.append({"name": name, "css_check": name})
+    
+    return techniques
+
+
+def check_spec_compliance(html_path: Path, contract: str) -> dict:
+    """Grep-based spec compliance check. No LLM, no cost, deterministic."""
+    if not html_path.exists():
+        return {"pass": False, "failures": ["BUILD FILE MISSING"], "checks": 0}
+    
+    html = html_path.read_text().lower()
+    results = {"pass": True, "failures": [], "warnings": [], "checks": 0}
+    
+    fonts = extract_fonts_from_contract(contract)
+    colors = extract_colors_from_contract(contract)
+    techniques = extract_techniques_from_contract(contract)
+    
+    # Check required fonts
+    for font in fonts["required"]:
+        results["checks"] += 1
+        if font.lower() not in html:
+            results["failures"].append(f"MISSING REQUIRED FONT: {font}")
+            results["pass"] = False
+    
+    # Check forbidden fonts
+    for font in fonts["forbidden"]:
+        results["checks"] += 1
+        if font.lower() in html:
+            results["failures"].append(f"CONTAINS FORBIDDEN FONT: {font}")
+            results["pass"] = False
+    
+    # Check required colors
+    for color in colors["required"]:
+        results["checks"] += 1
+        if color.lower() not in html:
+            results["warnings"].append(f"MISSING REQUIRED COLOR: {color}")
+            # Colors are warnings not failures — builder might use close variants
+    
+    # Check forbidden colors
+    for color in colors["forbidden"]:
+        results["checks"] += 1
+        if color.lower() in html:
+            results["failures"].append(f"CONTAINS FORBIDDEN COLOR: {color}")
+            results["pass"] = False
+    
+    # Check techniques
+    for tech in techniques:
+        results["checks"] += 1
+        if tech["css_check"].lower() not in html:
+            results["warnings"].append(f"MISSING TECHNIQUE: {tech['name']} (looking for: {tech['css_check']})")
+    
+    return results
+
+
 # ── Utility Functions ───────────────────────────────────────────
 
 def run_hermes(job_id: str, task_content: str, max_time: int = 1200, max_turns: int = 40) -> dict:
@@ -196,20 +382,41 @@ def research_node(state: PipelineState) -> dict:
     (run_dir / "builds").mkdir(exist_ok=True)
     (run_dir / "reviews").mkdir(exist_ok=True)
     
+    # Load knowledge layer for research quality
+    rubric = load_reference("art-direction-rubric.md", max_chars=4000)
+    patterns = load_reference("creative-patterns.md", max_chars=3000)
+    
     task = f"""You are a design researcher. Read the creative brief below and conduct visual research.
 
 ## Brief
 {state['brief']}
 
+## Quality Rubric (use this to evaluate each reference you find)
+{rubric if rubric else "(No rubric available — use your best judgment)"}
+
+## Known Creative Patterns (label references using these pattern names when applicable)
+{patterns if patterns else "(No pattern library available)"}
+
 ## Process
 1. Search for 5-8 reference sites/designs relevant to this brief
 2. Screenshot each at 1440px viewport
-3. Analyze: color palettes, typography, layout, texture, mood
-4. Find 3-5 real product images relevant to the brief topic
+3. For each reference, evaluate against the quality rubric above
+4. Analyze: color palettes (extract exact hex values), typography (identify fonts), layout (describe structure), texture (note specific techniques), mood
+5. Label each reference with which creative pattern(s) it uses
+6. Find 3-5 real product images relevant to the brief topic
+7. DISCARD any references that score below 6/10 on the rubric — quality over quantity
 
 ## Output
 Save your research to: {run_dir}/VISUAL-RESEARCH.md
 Save reference images to: {run_dir}/moodboard/
+
+In VISUAL-RESEARCH.md, include for each reference:
+- URL and screenshot filename
+- Rubric score (1-10) with brief justification
+- Pattern labels
+- Extracted palette (hex values)
+- Identified fonts
+- Notable techniques (with CSS/implementation hints when visible)
 """
     
     result = run_hermes(f"{state['name']}-research", task, max_time=900)
@@ -266,7 +473,18 @@ def designer_node(state: dict) -> dict:
     persona_path = WORKSPACE / "skills/creative-technologist/personas/DESIGNER.md"
     persona = persona_path.read_text() if persona_path.exists() else ""
     
+    # Load knowledge layer — technique menu and output format
+    tactics = load_reference("enhancement-tactics.md", max_chars=5000)
+    techniques_index = load_reference("advanced-techniques.md", max_chars=4000)
+    contract_template = load_reference("design-contract-template.md")
+    
     task = f"""{persona}
+
+## Available Techniques (pick from these — they are PROVEN to work in HTML/CSS/JS)
+{tactics if tactics else "(No technique menu available — use your expertise)"}
+
+## Advanced Techniques Reference (technique index — reference by name in your contract)
+{techniques_index if techniques_index else ""}
 
 ## Your Task
 Write an approach doc for a creative concept based on this brief. Your approach doc has TWO parts:
@@ -374,9 +592,56 @@ STOP after writing the approach doc. Do NOT build anything.
 
 
 def approach_gate_node(state: PipelineState) -> dict:
-    """Phase 2: Check approaches for convergence, ambition, compliance."""
+    """Phase 2: Check approaches for convergence, ambition, compliance.
+    Uses MECHANICAL extraction for convergence + LLM for ambition check."""
     print(f"[GATE] Reviewing {len(state['approaches'])} approaches")
     
+    # ── Step 1: Mechanical convergence detection (no LLM) ──
+    contracts = []
+    for a in state["approaches"]:
+        contract = extract_build_contract(a["content"])
+        fonts = extract_fonts_from_contract(contract)
+        colors = extract_colors_from_contract(contract)
+        contracts.append({
+            "designer_id": a["designer_id"],
+            "fonts": fonts,
+            "colors": colors,
+            "contract": contract,
+        })
+    
+    convergence_issues = []
+    for i, c1 in enumerate(contracts):
+        for j, c2 in enumerate(contracts):
+            if i >= j:
+                continue
+            # Check font overlap
+            shared_fonts = set(f.lower() for f in c1["fonts"]["required"]) & set(f.lower() for f in c2["fonts"]["required"])
+            if shared_fonts:
+                convergence_issues.append(
+                    f"Designer {c1['designer_id']} and Designer {c2['designer_id']} share fonts: {shared_fonts}"
+                )
+            # Check color overlap (primary colors only, first 3)
+            c1_colors = set(c.lower() for c in c1["colors"]["required"][:3])
+            c2_colors = set(c.lower() for c in c2["colors"]["required"][:3])
+            shared_colors = c1_colors & c2_colors
+            if shared_colors:
+                convergence_issues.append(
+                    f"Designer {c1['designer_id']} and Designer {c2['designer_id']} share primary colors: {shared_colors}"
+                )
+    
+    if convergence_issues:
+        print(f"  ⚠️  MECHANICAL CONVERGENCE DETECTED:")
+        for issue in convergence_issues:
+            print(f"     ✗ {issue}")
+    else:
+        print(f"  ✅ No font/color convergence detected across {len(contracts)} concepts")
+    
+    # Check for missing build contracts
+    missing_contracts = [a["designer_id"] for a in state["approaches"] if not extract_build_contract(a["content"])]
+    if missing_contracts:
+        print(f"  ⚠️  Missing BUILD CONTRACT in designers: {missing_contracts}")
+    
+    # ── Step 2: LLM ambition check (still useful for subjective quality) ──
     approaches_text = "\n\n---\n\n".join([
         f"## Designer {a['designer_id']} ({a['model']})\n{a['content'][:2000]}"
         for a in state["approaches"]
@@ -385,21 +650,20 @@ def approach_gate_node(state: PipelineState) -> dict:
     msg = anthropic_client.messages.create(
         model="claude-opus-4-6",
         max_tokens=2000,
-        messages=[{"role": "user", "content": f"""You are reviewing 3 creative approach docs for convergence and quality.
+        messages=[{"role": "user", "content": f"""You are reviewing 3 creative approach docs for quality and ambition.
+
+NOTE: Convergence has already been checked mechanically. Focus ONLY on:
+1. AMBITION: Does any approach feel conservative or generic? Would a creative director be excited or bored?
+2. COMPLIANCE: Does each approach address the brief's requirements?
+3. TECHNIQUE QUALITY: Are the specified CSS techniques ambitious and achievable?
 
 ## Approaches
 {approaches_text}
 
-## Check for:
-1. CONVERGENCE: Do any two approaches share the same palette family, primary technique, layout pattern, or interaction model? If yes, which ones and on what axes?
-2. AMBITION: Does any approach feel conservative or generic? Would a creative director be excited or bored?
-3. COMPLIANCE: Does each approach address the brief's requirements?
-
 ## Output (JSON):
 {{
-  "convergence_found": true/false,
-  "convergence_details": "...",
   "ambition_flags": ["designer X is too safe because..."],
+  "compliance_issues": ["designer X doesn't address..."],
   "all_pass": true/false,
   "notes": "..."
 }}
@@ -411,7 +675,12 @@ def approach_gate_node(state: PipelineState) -> dict:
         track_cost("claude-opus-4-6", msg.usage.input_tokens, msg.usage.output_tokens, "approach_gate")
     
     return {
-        "gate_result": {"raw": gate_text, "passed": "all_pass\": true" in gate_text.lower() or "\"all_pass\": true" in gate_text},
+        "gate_result": {
+            "raw": gate_text,
+            "passed": "all_pass\": true" in gate_text.lower() or "\"all_pass\": true" in gate_text,
+            "convergence_issues": convergence_issues,
+            "missing_contracts": missing_contracts,
+        },
         "phase": "gate_complete",
     }
 
@@ -437,14 +706,15 @@ def builder_node(state: dict) -> dict:
     
     # Extract Build Contract from approach doc
     approach_content = approach['content']
-    build_contract = ""
-    if "## BUILD CONTRACT" in approach_content:
-        build_contract = approach_content.split("## BUILD CONTRACT", 1)[1]
-        # Also grab everything before it as context
-        creative_narrative = approach_content.split("## BUILD CONTRACT", 1)[0]
+    build_contract = extract_build_contract(approach_content)
+    if build_contract:
+        creative_narrative = approach_content.split("## BUILD CONTRACT", 1)[0] if "## BUILD CONTRACT" in approach_content else approach_content
     else:
         creative_narrative = approach_content
         build_contract = "(No build contract found — follow the approach doc's specs exactly)"
+    
+    # Load proven code recipes for implementation guidance
+    recipes = load_reference("recipes.md", max_chars=6000)
     
     task = f"""{persona}
 
@@ -464,7 +734,12 @@ If verification fails, your build is rejected and you must redo it.
 ---
 
 ## CREATIVE NARRATIVE (read for context)
-{creative_narrative[:6000]}
+{creative_narrative[:3000]}
+
+---
+
+## CODE RECIPES (proven implementations — adapt these, don't reinvent)
+{recipes if recipes else "(No recipes available)"}
 
 ---
 
@@ -498,6 +773,49 @@ Save to: {run_dir}/builds/{concept_name}.html
     
     build_path = run_dir / f"builds/{concept_name}.html"
     
+    # Spec compliance check (grep-based, no LLM cost)
+    compliance = {"pass": True, "failures": [], "warnings": [], "checks": 0}
+    if build_path.exists() and build_contract and build_contract != "(No build contract found — follow the approach doc's specs exactly)":
+        compliance = check_spec_compliance(build_path, build_contract)
+        
+        if compliance["pass"]:
+            print(f"  ✅ Builder {idx}: spec compliance PASSED ({compliance['checks']} checks)")
+        else:
+            print(f"  ❌ Builder {idx}: spec compliance FAILED")
+            for f in compliance["failures"]:
+                print(f"     ✗ {f}")
+            
+            # Retry once with specific error
+            if compliance["failures"]:
+                fix_prompt = f"""Your build at {build_path} FAILED spec compliance checks:
+
+"""
+                for f in compliance["failures"]:
+                    fix_prompt += f"- {f}\n"
+                fix_prompt += f"""
+Fix ONLY these issues in the existing file. Do not rewrite the entire file.
+The Build Contract requires:
+{build_contract[:3000]}
+
+Save the fixed file to: {build_path}
+"""
+                print(f"  🔄 Builder {idx}: retrying with compliance fix...")
+                fix_result = run_hermes(f"{state['name']}-builder-{idx}-fix", fix_prompt, max_time=600, max_turns=20)
+                
+                # Re-check compliance
+                if build_path.exists():
+                    compliance = check_spec_compliance(build_path, build_contract)
+                    if compliance["pass"]:
+                        print(f"  ✅ Builder {idx}: compliance PASSED on retry")
+                    else:
+                        print(f"  ⚠️  Builder {idx}: still failing compliance after retry — advancing anyway")
+                        for f in compliance["failures"]:
+                            print(f"     ✗ {f}")
+        
+        if compliance["warnings"]:
+            for w in compliance["warnings"]:
+                print(f"     ⚡ {w}")
+    
     return {
         "builds": [{
             "index": idx,
@@ -507,6 +825,7 @@ Save to: {run_dir}/builds/{concept_name}.html
             "exists": build_path.exists(),
             "size": build_path.stat().st_size if build_path.exists() else 0,
             "status": result["status"],
+            "compliance": compliance,
         }],
     }
 
