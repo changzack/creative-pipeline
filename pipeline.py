@@ -644,6 +644,7 @@ The #1 failure mode is "AI slop" — clean, polished, soulless output. Every bui
 The acceptable builds all had: creative ambition, novel visual techniques, 3D/depth/layering, and felt like a human designer made them.
 
 **Your job is NOT to make something clean. Your job is to make something INTERESTING.**
+**Your concept must match the PRODUCT described in the brief.** The moodboard is for visual style only — if the brief says "ranked list of sneakers", don't design a music streaming recap. Read the brief's sample data (if any) and design around THAT content.
 - Push for novel techniques: 3D CSS, WebGL, SVG filters, generative patterns, creative compositing
 - A rough but creative concept >>> a polished but generic one
 - Think like an experimental graphic designer, not an AI assistant
@@ -981,6 +982,12 @@ The acceptable ones had: creative ambition, novel visual techniques, 3D/depth, a
 - Depth and layering matter more than cleanliness
 - Think experimental graphic design poster, not tech product card
 - If you zoom out and it looks like "dark card + light text + fade-in animation" — you've failed
+
+## CONTENT FIDELITY (non-negotiable)
+Your build must contain the ACTUAL content described in the brief — not content inspired by the moodboard.
+If the brief says "sneakers" and the moodboard shows music apps, you build SNEAKERS.
+The moodboard is for VISUAL STYLE inspiration only. The brief defines WHAT you're building.
+If the brief includes sample data, use it exactly. Do not invent different content.
 
 ## Your Task
 Build a complete, working HTML prototype. You have two inputs:
