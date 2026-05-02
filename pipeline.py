@@ -29,6 +29,9 @@ from anthropic import Anthropic
 from openai import OpenAI
 # import google.generativeai as genai  # will use via langchain
 
+# Observability
+from langfuse_tracing import tracer
+
 # ── Config ──────────────────────────────────────────────────────
 WORKSPACE = Path(os.path.expanduser("~/.openclaw/workspace"))
 PIPELINE_DIR = WORKSPACE / "pipeline"
@@ -512,6 +515,7 @@ def estimate_cost(model: str, input_tokens: int, output_tokens: int) -> float:
 def research_node(state: PipelineState) -> dict:
     """Phase 0.5: Visual research + moodboard."""
     print(f"[RESEARCH] Starting visual research for: {state['name']}")
+    span = tracer.start_span("research", input={"name": state["name"], "brief": state["brief"][:500]})
     
     run_dir = RUNS_DIR / state["name"]
     run_dir.mkdir(parents=True, exist_ok=True)
@@ -567,12 +571,14 @@ In VISUAL-RESEARCH.md, include for each reference:
     
     moodboard_files = list((run_dir / "moodboard").glob("*"))
     
-    return {
+    out = {
         "research": {"content": research_content, "status": result["status"]},
         "moodboard": [str(f) for f in moodboard_files],
         "phase": "research_complete",
         "cost_usd": state.get("cost_usd", 0) + 0.50,  # estimated
     }
+    tracer.end_span(span, output={"status": result["status"], "moodboard_count": len(moodboard_files)})
+    return out
 
 
 def fan_out_designers(state: PipelineState) -> list:
@@ -609,6 +615,7 @@ def designer_node(state: dict) -> dict:
     run_dir = RUNS_DIR / state["name"]
     
     print(f"[DESIGNER {designer_id}] Starting with model: {config['model']}")
+    span = tracer.start_span(f"designer-{designer_id}", input={"model": config["model"], "era": config.get("era")})
     
     # Load persistent persona
     persona_path = WORKSPACE / "skills/creative-technologist/personas/DESIGNER.md"
@@ -724,6 +731,11 @@ STOP after writing the approach doc. Do NOT build anything.
     else:
         print(f"  ✅ Designer {designer_id}: approach doc with BUILD CONTRACT ({len(approach)} bytes)")
     
+    tracer.end_span(span, output={
+        "status": result["status"],
+        "has_contract": "## BUILD CONTRACT" in approach,
+        "length": len(approach),
+    })
     return {
         "approaches": [{
             "designer_id": designer_id,
@@ -739,6 +751,7 @@ def approach_gate_node(state: PipelineState) -> dict:
     """Phase 2: Check approaches for convergence, ambition, compliance.
     Uses MECHANICAL extraction for convergence + LLM for ambition check."""
     print(f"[GATE] Reviewing {len(state['approaches'])} approaches")
+    span = tracer.start_span("approach_gate", input={"approach_count": len(state["approaches"])})
     
     # ── Step 1: Mechanical convergence detection (no LLM) ──
     contracts = []
@@ -818,7 +831,7 @@ NOTE: Convergence has already been checked mechanically. Focus ONLY on:
     if msg.usage:
         track_cost("claude-opus-4-6", msg.usage.input_tokens, msg.usage.output_tokens, "approach_gate")
     
-    return {
+    out = {
         "gate_result": {
             "raw": gate_text,
             "passed": "all_pass\": true" in gate_text.lower() or "\"all_pass\": true" in gate_text,
@@ -827,6 +840,12 @@ NOTE: Convergence has already been checked mechanically. Focus ONLY on:
         },
         "phase": "gate_complete",
     }
+    tracer.end_span(span, output={
+        "passed": out["gate_result"]["passed"],
+        "convergence_issues": len(convergence_issues),
+        "missing_contracts": len(missing_contracts),
+    })
+    return out
 
 
 def fan_out_builders(state: PipelineState) -> list:
@@ -903,6 +922,7 @@ def builder_node(state: dict) -> dict:
     builder_model = state.get("builder_model", "claude-opus")
     
     print(f"[BUILDER {idx}] Building from designer {approach['designer_id']} approach (model: {builder_model})")
+    span = tracer.start_span(f"builder-{idx}", input={"model": builder_model, "designer": approach["designer_id"]})
     
     # Load persistent builder persona
     persona_path = WORKSPACE / "skills/creative-technologist/personas/BUILDER.md"
@@ -1100,7 +1120,7 @@ Save the fixed file to: {build_path}
         except Exception as e:
             print(f"  ⚠️  Builder {idx}: self-review skipped ({type(e).__name__}: {e})")
     
-    return {
+    build_out = {
         "builds": [{
             "index": idx,
             "designer_id": approach["designer_id"],
@@ -1112,6 +1132,13 @@ Save the fixed file to: {build_path}
             "compliance": compliance,
         }],
     }
+    tracer.end_span(span, output={
+        "status": result["status"],
+        "exists": build_path.exists(),
+        "size": build_path.stat().st_size if build_path.exists() else 0,
+        "compliance": compliance,
+    })
+    return build_out
 
 
 def screenshot_builds(builds: list, run_name: str) -> list:
@@ -1157,6 +1184,7 @@ def encode_image(path: str) -> str:
 def pairwise_judge_node(state: PipelineState) -> dict:
     """Phase 5: Vision-based bidirectional pairwise tournament."""
     print(f"[JUDGE] Running vision-based pairwise tournament on {len(state['builds'])} builds")
+    span = tracer.start_span("judge", input={"build_count": len(state["builds"])})
     
     builds = state["builds"]
     if len(builds) < 2:
@@ -1293,11 +1321,20 @@ Then explain in 3-5 sentences WHY, citing specific visual elements you see in th
     for r in ranked_builds:
         print(f"  #{r['rank']} — Concept {r['build_index']} ({r.get('model', '?')}) — {r['wins']} wins")
     
-    return {
+    judge_out = {
         "pairwise_results": results,
         "ranking": ranked_builds,
         "phase": "judge_complete",
     }
+    tracer.end_span(span, output={
+        "ranking": [{"rank": r["rank"], "build": r["build_index"], "wins": r["wins"]} for r in ranked_builds],
+        "comparison_count": len(results),
+    })
+    # Score each build in Langfuse
+    for r in ranked_builds:
+        tracer.score(f"build-{r['build_index']}-rank", float(len(ranked_builds) - r["rank"] + 1),
+                     comment=f"Rank #{r['rank']} with {r['wins']} wins")
+    return judge_out
 
 
 def human_gate_node(state: PipelineState) -> Command:
@@ -1334,6 +1371,11 @@ def human_gate_node(state: PipelineState) -> Command:
     
     human_decision = decision.get("decision", "reject") if isinstance(decision, dict) else str(decision)
     human_feedback = decision.get("feedback", "") if isinstance(decision, dict) else ""
+    
+    # Langfuse: score the run with human decision
+    decision_scores = {"approve": 1.0, "iterate": 0.5, "reject": 0.0}
+    tracer.score("human_decision", decision_scores.get(human_decision, 0.0),
+                 comment=f"{human_decision}: {human_feedback[:200]}")
     
     # Record verdict to technique registry (cross-run learning)
     record_verdict(
@@ -1489,6 +1531,10 @@ def main():
         
         config["configurable"]["thread_id"] = args.name
         
+        # Initialize Langfuse tracing
+        tracer.init()
+        tracer.start_run(args.name, brief)
+        
         print(f"\n🚀 Starting pipeline: {args.name}")
         print(f"Brief: {brief_path}")
         print(f"State stored in: {DB_PATH}\n")
@@ -1503,10 +1549,13 @@ def main():
                     else:
                         print(f"  → {node}: {update}")
         
+        tracer.end_run(status="paused_or_completed", metadata={"run_name": args.name})
         print(f"\n✅ Pipeline paused or completed. Resume with:")
         print(f"  python pipeline.py resume --thread {args.name} --decision approve")
     
     elif args.command == "resume":
+        tracer.init()
+        tracer.start_run(f"{args.thread}-resume", metadata={"decision": args.decision, "feedback": args.feedback})
         print(f"\n🔄 Resuming pipeline: {args.thread}")
         print(f"Decision: {args.decision}")
         
