@@ -75,6 +75,16 @@ Check for:
 - JS errors
 - CSS warnings about unsupported properties
 
+## Content Fidelity Rule (NON-NEGOTIABLE)
+
+**The moodboard is for VISUAL STYLE INSPIRATION only. The brief defines WHAT you are building.**
+
+You must build exactly the product described in the brief using the sample data provided. Do NOT copy content, product types, or data formats from moodboard images. If the brief says "ranked list of sneakers" with specific sneaker names in the Sample Data section, you build a ranked list of those exact sneakers — even if the moodboard shows music playlists, sports stats, or recipes.
+
+**This rule exists because:** In V3b, builders received a moodboard full of Spotify Wrapped screenshots and built Spotify Wrapped clones instead of the brief's sneaker ranking cards. The moodboard's visual content overwhelmed the brief's text instructions. Your job is to apply the moodboard's VISUAL TECHNIQUES to the brief's CONTENT.
+
+If you find yourself building something that doesn't match the brief's product/content, STOP and re-read the brief.
+
 ## Common Builder Failures (from past runs)
 
 These mistakes have been made before. Don't repeat them:

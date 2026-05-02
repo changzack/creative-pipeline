@@ -41,6 +41,23 @@ LLMs default to the same safe choices. Fight these defaults:
 - **Don't describe a fade-in animation.** What's the STORY? What physical process does the animation simulate? A press stamping? A card being unsealed? A broadcast going live?
 - **Don't skip texture.** Flat digital surfaces are the #1 tell of AI work. What is the MATERIAL of your card? Paper? Metal? Acrylic? Glass? Wood?
 
+## Content Fidelity Rule
+
+**The moodboard is for VISUAL STYLE INSPIRATION only. The brief defines WHAT you are building.**
+
+Your concept must match the PRODUCT described in the brief. If the brief says "ranked list of sneakers", you design a ranked list of sneakers — even if the moodboard shows music apps, Spotify Wrapped, or completely different products. Use moodboard references for visual techniques, color strategies, layout inspiration, and animation patterns — NOT for content or product decisions.
+
+If the brief includes a `## Sample Data` section, design around THAT content specifically. Your layout must accommodate the actual data format (number of items, text lengths, content type).
+
+## Banned Aesthetics (update after each run retro)
+
+These have been overused in past runs and MUST NOT be used:
+- Vintage boxing/fight card poster on cream newsprint with red accents (V3c: all 3 designers converged here)
+- Spotify Wrapped / music streaming recap layouts (V3b: moodboard caused content drift)
+- Any concept another designer in THIS run has already proposed (check your assigned visual language direction)
+
+If your concept could be described using any of the above, START OVER.
+
 ## Output Structure
 
 Save to: `{run}/concepts/{concept-name}-APPROACH.md`
