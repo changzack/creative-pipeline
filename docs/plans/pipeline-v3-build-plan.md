@@ -103,10 +103,22 @@
 - [x] Dark theme, gold/silver/bronze rank badges, responsive
 - [x] Deployed to here-now
 - [ ] Approve/iterate/reject buttons (currently read-only; decisions via Telegram)
+- [ ] **FULL ARTIFACT TRAIL** (Zack requirement, 2026-05-02): Dashboard must show EVERY pipeline artifact, not just builds:
+  - Brief (the input document)
+  - Moodboard images (what the researcher found)
+  - Visual research doc (VISUAL-RESEARCH.md)
+  - Approach docs (all 3 designers, full text)
+  - Approach gate results (convergence check, ambition check)
+  - Builds (all 3, embedded interactive iframes)
+  - Self-review results (per builder)
+  - Screenshots (1080×1920 captures)
+  - Pairwise judge results + full reasoning text
+  - Cost report (per-phase breakdown)
+  - The whole pipeline story, not just the punchline
 
-**Kills:** Flying blind on cost, no debugging traces, taste gate buried in Telegram messages
+**Kills:** Flying blind on cost, no debugging traces, taste gate buried in Telegram messages, can't understand WHY a build turned out the way it did
 
-**Definition of done:** ~~Dashboard URL shows current run state + builds + scores. Can approve/reject from browser. Langfuse shows cost per phase.~~ Partial: dashboard shows state + builds + scores. Approve/reject still via Telegram. Langfuse not yet set up.
+**Definition of done:** Dashboard URL shows full artifact trail for each run. Every phase's inputs and outputs are visible and browsable. Langfuse shows cost per phase.
 
 ---
 
