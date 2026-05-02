@@ -269,7 +269,11 @@ def designer_node(state: dict) -> dict:
     task = f"""{persona}
 
 ## Your Task
-Write an approach doc for a creative concept based on this brief.
+Write an approach doc for a creative concept based on this brief. Your approach doc has TWO parts:
+1. **Creative Narrative** — your concept, references, and rationale (for humans to read)
+2. **Build Contract** — the EXACT specs the builder must follow (for the builder to execute)
+
+The Build Contract is the most important part. It will be extracted and given to the builder as hard requirements. If a value isn't in the Build Contract, the builder won't use it.
 
 ## Brief
 {state['brief']}
@@ -286,6 +290,53 @@ Write an approach doc for a creative concept based on this brief.
 Search the web for 3-5 references that inspire YOUR unique direction.
 These should be specific to your concept, not generic design sites.
 
+## REQUIRED OUTPUT FORMAT
+
+Your approach doc MUST end with a section called `## BUILD CONTRACT` that contains ONLY concrete, grep-able specs. No prose, no "feel like", no "inspired by". Just values.
+
+Example format (adapt to your concept):
+
+```
+## BUILD CONTRACT
+
+### REQUIRED FONTS (builder will be rejected if these are missing)
+- PRIMARY: `font-family: 'Oswald', sans-serif` — weights: 400, 600, 700
+- SECONDARY: `font-family: 'Playfair Display', serif` — weights: 700
+- MONO: `font-family: 'Roboto Mono', monospace` — weights: 400
+- Google Fonts URL: `https://fonts.googleapis.com/css2?family=Oswald:wght@400;600;700&family=Playfair+Display:wght@700&family=Roboto+Mono:wght@400&display=swap`
+
+### FORBIDDEN FONTS (builder will be rejected if these appear)
+- Bebas Neue, IBM Plex Mono, Inter, system-ui defaults
+
+### REQUIRED COLORS (builder will be rejected if these are missing)
+- BACKGROUND: `#0F1419`
+- PRIMARY_TEXT: `#F5F0E8`
+- ACCENT: `#E63B2E`
+- SECONDARY: `#1B2A4A`
+- Must NOT contain: #F5F0E1, #C4382A, #1A1A1E (these are other concepts' palettes)
+
+### LAYOUT
+- Card: 1080×1920px
+- #1 item: font-size 64px, occupies top 40% of card
+- #1 rank number: font-size 220px, Oswald 700
+- #2-3: font-size 28px
+- #4-10: font-size 18px
+- [specific layout structure with px values]
+
+### REQUIRED CSS TECHNIQUES (builder must implement ALL)
+- Risograph overprint: `mix-blend-mode: multiply` on accent layer
+- Ink press animation: translateY reveal with 0.6s cubic-bezier(0.16, 1, 0.3, 1)
+- Newsprint grain: SVG feTurbulence filter, baseFrequency="0.65"
+- [each technique on its own line with the CSS property/value]
+
+### ANIMATION SEQUENCE
+- Items #10-4: 200ms each, stagger 100ms
+- Items #3-2: 600ms each, hold 200ms between
+- Item #1: 1800ms reveal, scale(1.02) → scale(1)
+```
+
+The Build Contract must be specific enough that a script can grep your HTML and verify compliance. "Warm tones" is NOT specific enough. `#E63B2E` IS specific enough.
+
 ## Output
 Save your approach doc to: {run_dir}/concepts/designer-{designer_id}-APPROACH.md
 
@@ -295,7 +346,21 @@ STOP after writing the approach doc. Do NOT build anything.
     result = run_hermes(f"{state['name']}-designer-{designer_id}", task, max_time=600)
     
     approach_path = run_dir / f"concepts/designer-{designer_id}-APPROACH.md"
-    approach = approach_path.read_text() if approach_path.exists() else "Approach not generated"
+    
+    # Retry file read — Hermes may still be writing when .done signal fires
+    approach = "Approach not generated"
+    for attempt in range(3):
+        if approach_path.exists() and approach_path.stat().st_size > 100:
+            approach = approach_path.read_text()
+            break
+        time.sleep(2)
+    
+    if approach == "Approach not generated":
+        print(f"  ⚠️  Designer {designer_id}: approach doc missing or empty!")
+    elif "## BUILD CONTRACT" not in approach:
+        print(f"  ⚠️  Designer {designer_id}: approach doc missing BUILD CONTRACT section!")
+    else:
+        print(f"  ✅ Designer {designer_id}: approach doc with BUILD CONTRACT ({len(approach)} bytes)")
     
     return {
         "approaches": [{
@@ -370,22 +435,60 @@ def builder_node(state: dict) -> dict:
     
     concept_name = f"concept-{idx}"
     
+    # Extract Build Contract from approach doc
+    approach_content = approach['content']
+    build_contract = ""
+    if "## BUILD CONTRACT" in approach_content:
+        build_contract = approach_content.split("## BUILD CONTRACT", 1)[1]
+        # Also grab everything before it as context
+        creative_narrative = approach_content.split("## BUILD CONTRACT", 1)[0]
+    else:
+        creative_narrative = approach_content
+        build_contract = "(No build contract found — follow the approach doc's specs exactly)"
+    
     task = f"""{persona}
 
 ## Your Task
-Build a complete, working HTML prototype from this approach doc.
+Build a complete, working HTML prototype. You have two inputs:
+1. A Creative Narrative (context for understanding the concept)
+2. A BUILD CONTRACT (hard requirements you MUST follow exactly)
 
-## Approach Doc (YOUR CONTRACT)
-{approach['content']}
+The Build Contract contains grep-able specs. After you write your HTML, I will programmatically verify:
+- Your file contains the REQUIRED FONTS (exact font-family values)
+- Your file contains the REQUIRED COLORS (exact hex values)
+- Your file does NOT contain any FORBIDDEN fonts or colors
+- Each REQUIRED CSS TECHNIQUE is present
 
-## Key Rules
-1. IMPLEMENT every technique described in the approach doc — visible on screen, not just in code
-2. Default state = completed static card (all items visible)
-3. Add Play/Reset controls
-4. Use real product images from the moodboard directory if available
-5. All fonts via Google Fonts CDN
+If verification fails, your build is rejected and you must redo it.
+
+---
+
+## CREATIVE NARRATIVE (read for context)
+{creative_narrative[:6000]}
+
+---
+
+## ⚠️ BUILD CONTRACT (HARD REQUIREMENTS — YOUR BUILD WILL BE GREP-CHECKED)
+{build_contract}
+
+---
+
+## Build Rules
+1. IMPLEMENT every technique in the Build Contract — visible on screen, not just in code
+2. Use ONLY the fonts listed in REQUIRED FONTS. Using any font from FORBIDDEN FONTS = automatic rejection.
+3. Use ONLY the colors listed in REQUIRED COLORS as your primary palette. Using colors from "Must NOT contain" = automatic rejection.
+4. Default state = completed static card (all items visible)
+5. Add Play/Reset controls
 6. Single HTML file, all CSS/JS inline
 7. Must render at 1080×1920
+
+## Self-Check Before Saving
+Before writing the file, verify:
+- [ ] Does my `<link>` tag load the exact Google Fonts URL from the Build Contract?
+- [ ] Does my CSS use the exact font-family values from REQUIRED FONTS?
+- [ ] Do my primary colors match REQUIRED COLORS hex values?
+- [ ] Is each REQUIRED CSS TECHNIQUE implemented and visible?
+- [ ] Have I accidentally used any FORBIDDEN font or color?
 
 ## Output
 Save to: {run_dir}/builds/{concept_name}.html
