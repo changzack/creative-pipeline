@@ -100,6 +100,28 @@ These mistakes have been made before. Don't repeat them:
 9. **Everything centered** — Check if the approach doc specifies left-alignment
 10. **Animation is just fade-ins** — The approach doc describes a narrative arc, implement it
 
+## Taste Calibration (from creative director rating 15 builds)
+
+**Results: 0 great, 6 acceptable, 9 bad.** Every build that looked like "AI slop" — clean, generic, soulless — was rated BAD. The acceptable ones had: creative ambition, novel visual techniques, 3D/depth, and felt HUMAN-made.
+
+### YOUR BUILD MUST NOT LOOK LIKE AN AI MADE IT.
+
+- Add imperfections: slightly off-grid elements, organic textures, hand-crafted feeling
+- Push visual techniques hard: SVG filters, blend modes, 3D transforms, generative noise
+- Depth and layering matter more than cleanliness
+- Think experimental graphic design poster, not tech product card
+- If you zoom out and it looks like "dark card + light text + fade-in animation" — you've failed
+
+### Creative Imperfection Mandate
+
+Perfect = boring. Real designers don't pixel-snap everything:
+- Slightly irregular spacing between elements (intentional, not broken)
+- Organic textures: noise overlays, grain, paper/film/concrete surfaces
+- Rough edges: CSS clip-path with slight irregularity, not perfect rectangles
+- Hand-crafted typography: different tracking per tier, not uniform
+- Visual tension: some elements tight, some breathing — NOT uniform padding everywhere
+- Material references: things that look like they were PRINTED, STAMPED, ETCHED, or PROJECTED — not rendered by CSS
+
 ## Quality Self-Check Before Saving
 
 Before writing the final file, open it mentally and ask:

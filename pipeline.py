@@ -566,13 +566,17 @@ def research_node(state: PipelineState) -> dict:
     (run_dir / "builds").mkdir(exist_ok=True)
     (run_dir / "reviews").mkdir(exist_ok=True)
     
-    # Load knowledge layer for research quality
+    # Load persona + knowledge layer
+    persona_path = WORKSPACE / "skills/creative-technologist/personas/RESEARCHER.md"
+    persona = persona_path.read_text() if persona_path.exists() else ""
     rubric = load_reference("art-direction-rubric.md")
     patterns = load_reference("creative-patterns.md")
     past_learnings = get_relevant_learnings(state["brief"])
     
     # Build diverse search queries from the brief
-    task = f"""You are a design researcher using Refero (a curated library of 130,000+ real product screens).
+    task = f"""{persona}
+
+You are a design researcher using Refero (a curated library of 130,000+ real product screens).
 You have access to Refero MCP tools. USE THEM — do not use browser screenshots.
 
 ## YOUR TOOLS
@@ -1128,24 +1132,6 @@ The following moodboard images are at: {moodboard_dir}
         moodboard_ref += "\nOpen and study these images before building. They represent the quality bar and aesthetic direction.\n"
     
     task = f"""{persona}
-
-## CRITICAL TASTE CALIBRATION
-The creative director rated 15 past builds: **0 great, 6 acceptable, 9 bad.**
-Every build that looked like "AI slop" — clean, generic, soulless — was rated BAD.
-The acceptable ones had: creative ambition, novel visual techniques, 3D/depth, and felt HUMAN-made.
-
-**YOUR BUILD MUST NOT LOOK LIKE AN AI MADE IT.**
-- Add imperfections: slightly off-grid elements, organic textures, hand-crafted feeling
-- Push visual techniques hard: SVG filters, blend modes, 3D transforms, generative noise
-- Depth and layering matter more than cleanliness
-- Think experimental graphic design poster, not tech product card
-- If you zoom out and it looks like "dark card + light text + fade-in animation" — you've failed
-
-## CONTENT FIDELITY (non-negotiable)
-Your build must contain the ACTUAL content described in the brief — not content inspired by the moodboard.
-If the brief says "sneakers" and the moodboard shows music apps, you build SNEAKERS.
-The moodboard is for VISUAL STYLE inspiration only. The brief defines WHAT you're building.
-If the brief includes sample data, use it exactly. Do not invent different content.
 
 ## Your Task
 Build a complete, working HTML prototype. You have two inputs:
@@ -1713,26 +1699,30 @@ def pairwise_judge_node(state: PipelineState) -> dict:
 You are a harsh design critic evaluating two prototypes side by side.
 You're looking at SCREENSHOTS of the actual rendered output, not code.
 
-## CALIBRATED TASTE (from creative director rating 15 builds — 0 great, 6 acceptable, 9 bad)
-The #1 failure mode is "AI slop" — clean, polished, soulless output that looks like an AI made it.
-Builds that looked like AI = BAD. Builds with creative ambition + novel techniques = acceptable.
-A rough but interesting build >>> a clean but generic one.
-
-Judge on these criteria (in order of importance — creative ambition is 40%):
-1. CREATIVE AMBITION (40%) — Does this feel like a human designer made it? Is the concept novel? Are there interesting visual techniques (3D, SVG filters, generative patterns, creative compositing)? Or is it just "dark card + light text"?
-2. AI SLOP CHECK (20%) — Does it look like AI generated it? Signs: perfect spacing, generic gradients, glassmorphism, centered-everything, uniform padding, shadcn energy, dark card with white text and nothing else. If yes, it FAILS regardless of other qualities.
-3. VISUAL DEPTH (15%) — Texture, grain, layering, material quality. Flat colored divs = bad. Depth and dimension = good.
-4. TYPOGRAPHY (10%) — Is the hierarchy intentional? Fonts loaded? Real rhythm vs just size differences?
-5. HIERARCHY (10%) — Can you instantly tell what's #1? Legibility of lower items?
-6. TECHNICAL EXECUTION (5%) — Renders correctly, animation works. This is LEAST important — a broken but ambitious build beats a working but boring one.
-
-IMPORTANT: Start skeptical. Most AI prototypes are mediocre. A "winner" of a mediocre pair is still mediocre.
+Use the Calibrated Scoring Weights from your persona to evaluate.
+Start skeptical. Most AI prototypes are mediocre. A "winner" of a mediocre pair is still mediocre.
 If both are bad, say so — but you MUST still pick the less-bad one.
 
 YOU MUST CHOOSE. Respond with EXACTLY one line first: PREFER_A or PREFER_B
 TIE is NOT allowed unless the artifacts are pixel-identical. There is always a less-bad option.
 Then explain in 3-5 sentences WHY, citing specific visual elements you see in the screenshots."""
 
+    # Load moodboard images for judge context (research recommendation: judge should see moodboard)
+    moodboard_dir = RUNS_DIR / state["name"] / "moodboard"
+    judge_moodboard_parts = []
+    if moodboard_dir.exists():
+        moodboard_files = sorted([f for f in moodboard_dir.iterdir() if f.suffix.lower() in [".jpg", ".jpeg", ".png"]])
+        for mf in moodboard_files[:3]:  # top 3 moodboard images for context
+            try:
+                mb_b64 = encode_image(str(mf))
+                ext = mf.suffix.lower().lstrip(".")
+                mime = {"jpg": "image/jpeg", "jpeg": "image/jpeg", "png": "image/png"}.get(ext, "image/jpeg")
+                judge_moodboard_parts.append({"type": "image_url", "image_url": {"url": f"data:{mime};base64,{mb_b64}"}})
+            except Exception:
+                pass
+        if judge_moodboard_parts:
+            print(f"  📎 Judge will see {len(judge_moodboard_parts)} moodboard reference images")
+    
     pairs = list(itertools.combinations(range(len(builds)), 2))
     wins = {i: 0 for i in range(len(builds))}
     results = []
@@ -1747,14 +1737,17 @@ Then explain in 3-5 sentences WHY, citing specific visual elements you see in th
             results.append({"pair": [i, j], "agreed": False, "winner": None, "error": "missing screenshot"})
             continue
         
+        # Build context with optional moodboard reference
+        context_parts = []
+        if judge_moodboard_parts:
+            context_parts.append({"type": "text", "text": "MOODBOARD REFERENCES (the visual direction these builds should match):"})
+            context_parts.extend(judge_moodboard_parts)
+        context_parts.append({"type": "text", "text": f"Compare these two share card prototypes.\n\nBrief context: {state['brief'][:500]}\n\nImage 1 is ARTIFACT A. Image 2 is ARTIFACT B."})
+        context_parts.append({"type": "image_url", "image_url": {"url": f"data:image/png;base64,{img_i}"}})
+        context_parts.append({"type": "image_url", "image_url": {"url": f"data:image/png;base64,{img_j}"}})
+        
         # Forward direction: A=i, B=j
-        fwd_messages = [
-            {"role": "user", "content": [
-                {"type": "text", "text": f"Compare these two share card prototypes.\n\nBrief context: {state['brief'][:500]}\n\nImage 1 is ARTIFACT A. Image 2 is ARTIFACT B."},
-                {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{img_i}"}},
-                {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{img_j}"}},
-            ]}
-        ]
+        fwd_messages = [{"role": "user", "content": context_parts}]
         
         fwd_response = openai_client.chat.completions.create(
             model=judge_model,
@@ -1766,13 +1759,14 @@ Then explain in 3-5 sentences WHY, citing specific visual elements you see in th
             track_cost(judge_model, fwd_response.usage.prompt_tokens, fwd_response.usage.completion_tokens, "judge")
         
         # Reverse direction: A=j, B=i (swap images)
-        rev_messages = [
-            {"role": "user", "content": [
-                {"type": "text", "text": f"Compare these two share card prototypes.\n\nBrief context: {state['brief'][:500]}\n\nImage 1 is ARTIFACT A. Image 2 is ARTIFACT B."},
-                {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{img_j}"}},
-                {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{img_i}"}},
-            ]}
-        ]
+        rev_parts = []
+        if judge_moodboard_parts:
+            rev_parts.append({"type": "text", "text": "MOODBOARD REFERENCES (the visual direction these builds should match):"})
+            rev_parts.extend(judge_moodboard_parts)
+        rev_parts.append({"type": "text", "text": f"Compare these two share card prototypes.\n\nBrief context: {state['brief'][:500]}\n\nImage 1 is ARTIFACT A. Image 2 is ARTIFACT B."})
+        rev_parts.append({"type": "image_url", "image_url": {"url": f"data:image/png;base64,{img_j}"}})
+        rev_parts.append({"type": "image_url", "image_url": {"url": f"data:image/png;base64,{img_i}"}})
+        rev_messages = [{"role": "user", "content": rev_parts}]
         
         rev_response = openai_client.chat.completions.create(
             model=judge_model,

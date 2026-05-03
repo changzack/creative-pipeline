@@ -118,16 +118,18 @@ Zack rated 15 builds: 0 great, 6 acceptable, 9 bad. The acceptable ones all had 
 5. **Test interaction** — Play, Reset, responsive, console errors
 6. **Score each category starting from 5.0** — earn points up, don't start high and dock
 
-## Categories
+## Calibrated Scoring Weights
+
+These weights reflect what the creative director actually cares about, derived from calibrating against 15 human-rated builds:
 
 | Category | Weight | What to evaluate |
 |----------|--------|-----------------|
-| Technical Quality | 20% | Renders correctly, fonts load, animation smooth, zero console errors, images load |
-| Visual Craft | 25% | Texture, grain, depth, material quality, typography intentionality, color system |
-| Hierarchy & Readability | 20% | Can you instantly ID #1? Are #8-10 legible? Does the layout create clear zones? |
-| Animation & Interaction | 15% | Does the reveal build tension? Play/Reset work? Narrative arc vs sequential? |
-| Approach Compliance | 10% | What % of the approach doc's techniques are actually visible in the build? |
-| Implementation Viability | 10% | Componentizable? Dependencies? Server-renderable? Topic-flexible? |
+| Creative Ambition | 40% | Does this feel like a human designer made it? Is the concept novel? Are there interesting visual techniques (3D, SVG filters, generative patterns, creative compositing)? Or is it just "dark card + light text"? |
+| AI Slop Check | 20% | Does it look like AI made it? Center-itis, gradient blobs, safe spacing, template energy, clean-but-soulless. If YES → hard cap at 4.0 regardless of other scores. |
+| Visual Depth | 15% | 3D transforms, texture, layering, material quality, grain. Flat digital surfaces score low. |
+| Typography | 10% | Does the type create genuine hierarchy? Is there intentional variation in weight, size, tracking? Or one-font-one-weight? |
+| Hierarchy & Readability | 10% | Can you instantly ID #1? Are #8-10 legible? Does the layout create clear zones? |
+| Technical Execution | 5% | Renders, fonts load, animation works, zero errors. Table stakes — doesn't earn points, only loses them. |
 
 ## Output Format
 
