@@ -368,15 +368,15 @@ Run the full pipeline with Kanban integration. Verify:
 | 6. E2E test (V3j) | 1 run (~40 min) | Phase 5 |
 | **Total** | **~6-8 hours** | |
 
-## Decision Points for Zack
+## Decisions (Confirmed by Zack, May 3)
 
-1. **Profile granularity:** One `designer` profile for all 3 designers, or `designer-0`, `designer-1`, `designer-2`? Single profile means shared memory (good — all learn the same banned aesthetics). Multiple means isolated identity (good — each develops different creative instincts).
+1. **Profile granularity:** Single `designer` profile for all 3 designers. Shared memory — all learn banned aesthetics together. Divergence comes from the visual language mandate in the task, not the profile identity.
 
-2. **Dispatcher interval:** 30s or 15s? Faster = less latency but more CPU. 30s is fine for our pipeline cadence.
+2. **Dispatcher interval:** 30s default.
 
-3. **Memory seeding:** Pre-seed profiles with our accumulated learnings, or let them build memory organically from runs?
+3. **Memory seeding:** Pre-seed profiles with accumulated learnings from 8+ runs. No reason to relearn.
 
-4. **Timing:** Implement now (before V3i results) or after reviewing V3i?
+4. **Timing:** Start after V3i results are reviewed.
 
 ---
 

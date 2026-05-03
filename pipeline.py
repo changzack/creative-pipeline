@@ -1081,7 +1081,52 @@ def build_direct_api(model: str, prompt: str, output_path: Path, run_name: str, 
         return {"status": "done"}
         
     except Exception as e:
-        print(f"    [direct-api] Error: {type(e).__name__}: {e}")
+        print(f"    [direct-api] Error (attempt 1): {type(e).__name__}: {e}")
+        # Retry up to 2 more times with backoff
+        for attempt in range(2, 4):
+            wait = 10 * (attempt - 1)
+            print(f"    [direct-api] Retrying in {wait}s (attempt {attempt}/3)...")
+            time.sleep(wait)
+            try:
+                if model.startswith("gpt"):
+                    response = openai_client.chat.completions.create(
+                        model=model,
+                        max_completion_tokens=32000,
+                        messages=[{"role": "user", "content": prompt + "\n\nRespond with ONLY the complete HTML file content. No markdown fences, no explanation. Start with <!DOCTYPE html>."}],
+                    )
+                    html = response.choices[0].message.content
+                    if response.usage:
+                        track_cost(model, response.usage.prompt_tokens, response.usage.completion_tokens, "builder")
+                elif model.startswith("gemini"):
+                    from google import genai as google_genai
+                    gemini_client = google_genai.Client(api_key=os.environ.get("GOOGLE_API_KEY", ""))
+                    response = gemini_client.models.generate_content(
+                        model="gemini-3.1-pro-preview",
+                        contents=prompt + "\n\nRespond with ONLY the complete HTML file content. No markdown fences, no explanation. Start with <!DOCTYPE html>.",
+                        config={"max_output_tokens": 32000},
+                    )
+                    html = response.text
+                    if hasattr(response, 'usage_metadata'):
+                        track_cost("gemini-3.1-pro-preview",
+                            getattr(response.usage_metadata, 'prompt_token_count', 0),
+                            getattr(response.usage_metadata, 'candidates_token_count', 0),
+                            "builder")
+                else:
+                    break
+                
+                html = html.strip()
+                if html.startswith("```html"): html = html[7:]
+                if html.startswith("```"): html = html[3:]
+                if html.endswith("```"): html = html[:-3]
+                html = html.strip()
+                
+                output_path.parent.mkdir(parents=True, exist_ok=True)
+                output_path.write_text(html)
+                print(f"    [direct-api] Wrote {len(html)} bytes on retry {attempt}")
+                return {"status": "done"}
+            except Exception as retry_e:
+                print(f"    [direct-api] Retry {attempt} failed: {type(retry_e).__name__}: {retry_e}")
+        
         return {"status": "failed", "error": str(e)}
 
 
