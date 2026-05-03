@@ -715,11 +715,8 @@ The Build Contract is the most important part. It will be extracted and given to
 ## Your Constraints
 - Era/Reference Direction: {config['era']}
 - Anti-Patterns (DO NOT USE): {config['anti_patterns']}
-- You MUST do independent web research for 3-5 additional references
-
-## Independent Research (REQUIRED)
-Search the web for 3-5 references that inspire YOUR unique direction.
-These should be specific to your concept, not generic design sites.
+- Do NOT do browser web research. The Visual Research above is your complete reference set.
+- If you have Refero MCP tools, you MAY do 1-2 targeted searches via `mcp_refero_refero_search_screens` — but no more. Spend your budget on DESIGNING, not researching.
 
 ## REQUIRED OUTPUT FORMAT
 
