@@ -530,52 +530,87 @@ def research_node(state: PipelineState) -> dict:
     patterns = load_reference("creative-patterns.md", max_chars=3000)
     past_learnings = get_relevant_learnings(state["brief"])
     
-    task = f"""You are a design researcher. Read the creative brief below and conduct visual research.
+    # Build diverse search queries from the brief
+    task = f"""You are a design researcher using Refero (a curated library of 130,000+ real product screens).
+You have access to Refero MCP tools. USE THEM — do not use browser screenshots.
+
+## YOUR TOOLS
+- `mcp_refero_refero_search_screens` — semantic search for UI screens (query + platform "web" or "ios")
+- `mcp_refero_refero_get_screen_content` — get the actual image of a screen (returns base64)
+- `mcp_refero_refero_get_similar_screens` — find similar designs from a good match
+- `mcp_refero_refero_search_flows` — search multi-step user flows
+
+## RESEARCH PROCESS (follow exactly)
+
+### Step 1: Run 4-5 diverse search queries
+Read the brief and create 4-5 search queries that cover DIFFERENT visual approaches:
+- Query 1: Direct match (e.g., "ranked list share card", "leaderboard social sharing")
+- Query 2: Visual technique match (e.g., "3D product showcase card", "isometric data display")
+- Query 3: Adjacent pattern (e.g., "stats comparison card dark mode", "sports ranking dashboard")
+- Query 4: Layout/composition match (e.g., "vertical list with visual hierarchy", "numbered ranking with images")
+- Query 5: Experimental/creative (e.g., "creative data visualization card", "animated infographic")
+
+For each query, use `mcp_refero_refero_search_screens` with platform="web".
+
+### Step 2: Select top 8-10 screens
+From ALL search results, pick the 8-10 most relevant and visually diverse screens.
+Selection criteria:
+- DIVERSE visual languages (don't pick 5 screens that look the same)
+- HIGH relevance to the brief's product/format
+- INTERESTING techniques (unusual layouts, creative typography, strong visual hierarchy)
+
+### Step 3: Get actual images for top 5
+Use `mcp_refero_refero_get_screen_content` to download the base64 image for your top 5 picks.
+Save each image to: {run_dir}/moodboard/ as PNG files.
+
+### Step 4: Deep analysis
+For each of the 8-10 selected screens, extract:
+- **Exact hex colors** (Refero provides these in the metadata)
+- **Font families** (Refero provides these)
+- **Layout structure** (describe the composition, grid, spacing)
+- **UX patterns** (Refero provides pattern labels)
+- **Notable techniques** (what makes this design interesting? CSS hints?)
+- **Relevance score** (1-10) for how useful this is as a reference
+
+### Step 5: Write VISUAL-RESEARCH.md
+Save a structured research document to: {run_dir}/VISUAL-RESEARCH.md
+
+Format for each reference:
+```
+## Reference N: [Site Name] — [Description]
+- **Refero UUID**: [uuid]
+- **Relevance**: [score]/10
+- **Colors**: [hex values from Refero metadata]
+- **Fonts**: [font names from Refero metadata]
+- **UX Patterns**: [pattern labels]
+- **Layout**: [description of structure]
+- **Key Technique**: [what makes this interesting]
+- **Inspiration Value**: [how a designer should use this reference]
+```
+
+## BANNED REFERENCES (from past run retros)
+- NO vintage boxing/fight card posters
+- NO Spotify Wrapped or music streaming recaps
+- NO cream/newsprint backgrounds with red accents
 
 ## DIVERSITY MANDATE
-Your moodboard must include references from AT LEAST 3 of these categories:
-1. 3D/spatial design (isometric, perspective, depth layers)
-2. Data visualization / infographics (charts, radial layouts, node networks)
-3. Kinetic typography / motion design (text animation, morphing, glitch)
-4. Editorial / magazine layout (grids, asymmetry, bold typography)
-5. Experimental web (generative art, creative coding, interactive)
-
-DO NOT fill the moodboard with only one aesthetic direction.
-DO NOT include vintage boxing posters, fight cards, or newspaper broadsheets — these have been overused in past runs.
-DO NOT include Spotify Wrapped or music streaming recap designs.
-Prioritize DIVERSE visual languages over cohesive mood.
+Your final selection must include references from AT LEAST 3 of these visual approaches:
+1. 3D/spatial (depth, layers, perspective)
+2. Data visualization (charts, treemaps, radial layouts)
+3. Kinetic/motion (animation, transformation)
+4. Editorial/magazine (grids, asymmetry, bold type)
+5. Experimental (generative, creative coding, unusual interactions)
 
 ## Brief
 {state['brief']}
 
-## Quality Rubric (use this to evaluate each reference you find)
+## Quality Rubric
 {rubric if rubric else "(No rubric available — use your best judgment)"}
 
-## Known Creative Patterns (label references using these pattern names when applicable)
+## Known Creative Patterns
 {patterns if patterns else "(No pattern library available)"}
 
-## Process
-1. Search for 5-8 reference sites/designs relevant to this brief
-2. Screenshot each at 1440px viewport
-3. For each reference, evaluate against the quality rubric above
-4. Analyze: color palettes (extract exact hex values), typography (identify fonts), layout (describe structure), texture (note specific techniques), mood
-5. Label each reference with which creative pattern(s) it uses
-6. Find 3-5 real product images relevant to the brief topic
-7. DISCARD any references that score below 6/10 on the rubric — quality over quantity
-
-## Output
-Save your research to: {run_dir}/VISUAL-RESEARCH.md
-Save reference images to: {run_dir}/moodboard/
-
 {('## Past Run Learnings (avoid repeating mistakes)' + chr(10) + past_learnings) if past_learnings else ''}
-
-In VISUAL-RESEARCH.md, include for each reference:
-- URL and screenshot filename
-- Rubric score (1-10) with brief justification
-- Pattern labels
-- Extracted palette (hex values)
-- Identified fonts
-- Notable techniques (with CSS/implementation hints when visible)
 """
     
     result = run_hermes(f"{state['name']}-research", task, max_time=900)
