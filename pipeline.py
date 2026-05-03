@@ -273,13 +273,47 @@ def get_relevant_learnings(brief: str, max_items: int = 10) -> str:
     return "\n".join(output_parts) if output_parts else ""
 
 
+# ── Context Budget ──────────────────────────────────────────────
+# Model context windows (in tokens). We use ~4 chars/token as rough estimate.
+# Reserve 35K tokens for output, use the rest for input.
+MODEL_CONTEXT_WINDOWS = {
+    "claude-opus": 200000,
+    "gpt-5.4": 128000,
+    "gpt-4.1": 128000,
+    "gpt-4o": 128000,
+    "gpt-5": 128000,
+    "gemini-2.5-pro": 1000000,
+    "gemini-3.1-pro-preview": 1000000,
+}
+OUTPUT_RESERVE_TOKENS = 35000  # reserve for generation
+CHARS_PER_TOKEN = 4  # conservative estimate
+
+def get_context_budget(model: str) -> int:
+    """Return available input budget in characters for a given model."""
+    window = MODEL_CONTEXT_WINDOWS.get(model, 128000)
+    available_tokens = window - OUTPUT_RESERVE_TOKENS
+    return available_tokens * CHARS_PER_TOKEN
+
+def smart_truncate(text: str, budget: int, label: str = "") -> str:
+    """Truncate text to budget chars. If truncated, log it."""
+    if len(text) <= budget:
+        return text
+    truncated = text[:budget]
+    # Try to break at a paragraph boundary
+    last_para = truncated.rfind("\n\n")
+    if last_para > budget * 0.8:
+        truncated = truncated[:last_para]
+    if label:
+        print(f"  ⚠️  {label}: truncated from {len(text)} to {len(truncated)} chars ({len(truncated)*100//len(text)}%)")
+    return truncated
+
+
 # ── Knowledge Layer ─────────────────────────────────────────────
 REFERENCES_DIR = WORKSPACE / "skills/creative-technologist/references"
 
 def load_reference(filename: str, max_chars: Optional[int] = None, section: Optional[str] = None) -> str:
     """Load a reference doc from the skills directory.
-    Respects context budget with max_chars truncation.
-    Can extract a specific section by heading."""
+    Optional max_chars for explicit budget control; defaults to full file."""
     path = REFERENCES_DIR / filename
     if not path.exists():
         print(f"  ⚠️  Reference missing: {filename}")
@@ -533,8 +567,8 @@ def research_node(state: PipelineState) -> dict:
     (run_dir / "reviews").mkdir(exist_ok=True)
     
     # Load knowledge layer for research quality
-    rubric = load_reference("art-direction-rubric.md", max_chars=4000)
-    patterns = load_reference("creative-patterns.md", max_chars=3000)
+    rubric = load_reference("art-direction-rubric.md")
+    patterns = load_reference("creative-patterns.md")
     past_learnings = get_relevant_learnings(state["brief"])
     
     # Build diverse search queries from the brief
@@ -678,8 +712,8 @@ def designer_node(state: dict) -> dict:
     persona = persona_path.read_text() if persona_path.exists() else ""
     
     # Load knowledge layer — technique menu and output format
-    tactics = load_reference("enhancement-tactics.md", max_chars=5000)
-    techniques_index = load_reference("advanced-techniques.md", max_chars=4000)
+    tactics = load_reference("enhancement-tactics.md")
+    techniques_index = load_reference("advanced-techniques.md")
     contract_template = load_reference("design-contract-template.md")
     past_learnings = get_relevant_learnings(state["brief"])
     
@@ -866,7 +900,7 @@ def approach_gate_node(state: PipelineState) -> dict:
     
     # ── Step 2: LLM ambition check (still useful for subjective quality) ──
     approaches_text = "\n\n---\n\n".join([
-        f"## Designer {a['designer_id']} ({a['model']})\n{a['content'][:2000]}"
+        f"## Designer {a['designer_id']} ({a['model']})\n{a['content']}"
         for a in state["approaches"]
     ])
     
@@ -946,18 +980,48 @@ def fan_out_builders(state: PipelineState) -> list:
     return builders
 
 
-def build_direct_api(model: str, prompt: str, output_path: Path, run_name: str) -> dict:
+def build_direct_api(model: str, prompt: str, output_path: Path, run_name: str, moodboard_images: Optional[list] = None) -> dict:
     """Build HTML via direct API call (no Hermes). Returns status dict.
-    Used for GPT and Gemini builders that don't need tool use."""
+    Used for GPT and Gemini builders that don't need tool use.
+    moodboard_images: optional list of image file paths to send as vision input."""
     
     print(f"    [direct-api] Calling {model}...")
     
+    # Encode moodboard images for vision-capable models
+    image_parts = []
+    if moodboard_images:
+        import base64
+        for img_path in moodboard_images[:3]:  # max 3 to keep reasonable
+            try:
+                with open(img_path, "rb") as f:
+                    img_b64 = base64.standard_b64encode(f.read()).decode("utf-8")
+                ext = str(img_path).rsplit(".", 1)[-1].lower()
+                mime = {"jpg": "image/jpeg", "jpeg": "image/jpeg", "png": "image/png"}.get(ext, "image/jpeg")
+                image_parts.append({"b64": img_b64, "mime": mime, "name": Path(img_path).name})
+                print(f"    [direct-api] Attached moodboard image: {Path(img_path).name}")
+            except Exception as e:
+                print(f"    [direct-api] Failed to encode {img_path}: {e}")
+    
+    suffix = "\n\nRespond with ONLY the complete HTML file content. No markdown fences, no explanation. Start with <!DOCTYPE html>."
+    
     try:
         if model.startswith("gpt"):
+            # Build multimodal message with images if available
+            if image_parts:
+                content_parts = []
+                content_parts.append({"type": "text", "text": "## MOODBOARD REFERENCE IMAGES\nStudy these — your build should feel like it belongs in this visual family:\n"})
+                for img in image_parts:
+                    content_parts.append({"type": "text", "text": f"**{img['name']}:**"})
+                    content_parts.append({"type": "image_url", "image_url": {"url": f"data:{img['mime']};base64,{img['b64']}"}})
+                content_parts.append({"type": "text", "text": prompt + suffix})
+                messages = [{"role": "user", "content": content_parts}]
+            else:
+                messages = [{"role": "user", "content": prompt + suffix}]
+            
             response = openai_client.chat.completions.create(
                 model=model,
                 max_completion_tokens=32000,
-                messages=[{"role": "user", "content": prompt + "\n\nRespond with ONLY the complete HTML file content. No markdown fences, no explanation. Start with <!DOCTYPE html>."}],
+                messages=messages,
             )
             html = response.choices[0].message.content
             if response.usage:
@@ -967,9 +1031,23 @@ def build_direct_api(model: str, prompt: str, output_path: Path, run_name: str) 
             from google import genai as google_genai
             gemini_client = google_genai.Client(api_key=os.environ.get("GOOGLE_API_KEY", ""))
             gemini_model_id = "gemini-3.1-pro-preview"
+            
+            # Build multimodal content for Gemini
+            if image_parts:
+                from google.genai import types as genai_types
+                parts = []
+                parts.append(genai_types.Part.from_text("## MOODBOARD REFERENCE IMAGES\nStudy these — your build should feel like it belongs in this visual family:\n"))
+                for img in image_parts:
+                    parts.append(genai_types.Part.from_text(f"**{img['name']}:**"))
+                    parts.append(genai_types.Part.from_bytes(data=base64.standard_b64decode(img["b64"]), mime_type=img["mime"]))
+                parts.append(genai_types.Part.from_text(prompt + suffix))
+                contents = parts
+            else:
+                contents = prompt + suffix
+            
             response = gemini_client.models.generate_content(
                 model=gemini_model_id,
-                contents=prompt + "\n\nRespond with ONLY the complete HTML file content. No markdown fences, no explanation. Start with <!DOCTYPE html>.",
+                contents=contents,
                 config={"max_output_tokens": 32000},
             )
             html = response.text
@@ -1029,18 +1107,23 @@ def builder_node(state: dict) -> dict:
         build_contract = "(No build contract found — follow the approach doc's specs exactly)"
     
     # Load proven code recipes for implementation guidance
-    recipes = load_reference("recipes.md", max_chars=6000)
+    recipes = load_reference("recipes.md")
     
     # 4.5C: Identify moodboard images for builder reference
     moodboard_dir = run_dir / "moodboard"
-    moodboard_images = sorted(moodboard_dir.glob("*.png"))[:3] if moodboard_dir.exists() else []
+    all_moodboard = []
+    if moodboard_dir.exists():
+        for ext in ["*.png", "*.jpg", "*.jpeg"]:
+            all_moodboard.extend(moodboard_dir.glob(ext))
+    all_moodboard = sorted(all_moodboard)[:5]  # up to 5 reference images
+    
     moodboard_ref = ""
-    if moodboard_images:
+    if all_moodboard:
         moodboard_ref = f"""
 ## REFERENCE IMAGES (study these — your build should feel like it belongs in this visual family)
 The following moodboard images are at: {moodboard_dir}
 """
-        for img in moodboard_images:
+        for img in all_moodboard:
             moodboard_ref += f"- {img.name}\n"
         moodboard_ref += "\nOpen and study these images before building. They represent the quality bar and aesthetic direction.\n"
     
@@ -1079,8 +1162,8 @@ If verification fails, your build is rejected and you must redo it.
 
 ---
 
-## CREATIVE NARRATIVE (read for context)
-{creative_narrative[:3000]}
+## CREATIVE NARRATIVE (read for context — this is the designer's full vision)
+{creative_narrative}
 
 ---
 
@@ -1118,10 +1201,18 @@ Save to: {run_dir}/builds/{concept_name}.html
     
     build_path = run_dir / f"builds/{concept_name}.html"
     
+    # Context budget check
+    task_size = len(task)
+    budget = get_context_budget(builder_model)
+    usage_pct = task_size * 100 // budget
+    print(f"  📊 Builder {idx} context: {task_size//1024}KB / {budget//1024}KB ({usage_pct}% of {builder_model} window)")
+    if task_size > budget * 0.85:
+        print(f"  ⚠️  Builder {idx}: context at {usage_pct}% — may impact output quality")
+    
     # Route to appropriate builder based on model
     if builder_model.startswith("gpt") or builder_model.startswith("gemini"):
-        # Direct API — model generates HTML directly
-        result = build_direct_api(builder_model, task, build_path, state["name"])
+        # Direct API — model generates HTML directly, with moodboard vision
+        result = build_direct_api(builder_model, task, build_path, state["name"], moodboard_images=all_moodboard)
     else:
         # Hermes (Claude) — agent with tool use
         result = run_hermes(f"{state['name']}-builder-{idx}", task, max_time=1800, max_turns=50)
@@ -1148,7 +1239,7 @@ Save to: {run_dir}/builds/{concept_name}.html
                 fix_prompt += f"""
 Fix ONLY these issues in the existing file. Do not rewrite the entire file.
 The Build Contract requires:
-{build_contract[:3000]}
+{build_contract}
 
 Save the fixed file to: {build_path}
 """
