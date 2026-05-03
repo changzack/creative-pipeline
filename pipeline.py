@@ -54,8 +54,10 @@ COST_PER_1M = {
     "claude-opus-4-6": {"input": 15.0, "output": 75.0},
     "gpt-4o": {"input": 2.5, "output": 10.0},
     "gpt-4.1": {"input": 2.0, "output": 8.0},
+    "gpt-5.4": {"input": 2.50, "output": 10.0},
     "gpt-4o-mini": {"input": 0.15, "output": 0.6},
     "gemini-2.5-pro": {"input": 1.25, "output": 10.0},
+    "gemini-3.1-pro-preview": {"input": 2.0, "output": 12.0},
 }
 
 # Run-level cost accumulator
@@ -508,7 +510,9 @@ def estimate_cost(model: str, input_tokens: int, output_tokens: int) -> float:
     rates = {
         "claude-opus-4-6": (15.0, 75.0),      # per 1M tokens (in, out)
         "gpt-5": (10.0, 30.0),                  # estimated
+        "gpt-5.4": (2.50, 10.0),               # per 1M tokens
         "gemini-2.5-pro": (1.25, 10.0),         # per 1M tokens
+        "gemini-3.1-pro-preview": (2.0, 12.0),  # per 1M tokens
     }
     rate = rates.get(model, (10.0, 30.0))
     return (input_tokens * rate[0] + output_tokens * rate[1]) / 1_000_000
@@ -934,7 +938,7 @@ IMPORTANT: If 2+ concepts share the same metaphor/aesthetic, all_pass MUST be fa
 
 def fan_out_builders(state: PipelineState) -> list:
     """Fan out to 3 parallel builder nodes, each with a different model assignment."""
-    model_assignments = ["claude-opus", "gpt-4.1", "gemini-2.5-pro"]
+    model_assignments = ["claude-opus", "gpt-5.4", "gemini-3.1-pro-preview"]
     builders = []
     for i in range(len(state["approaches"])):
         model = model_assignments[i % len(model_assignments)]
@@ -952,7 +956,7 @@ def build_direct_api(model: str, prompt: str, output_path: Path, run_name: str) 
         if model.startswith("gpt"):
             response = openai_client.chat.completions.create(
                 model=model,
-                max_tokens=32000,
+                max_completion_tokens=32000,
                 messages=[{"role": "user", "content": prompt + "\n\nRespond with ONLY the complete HTML file content. No markdown fences, no explanation. Start with <!DOCTYPE html>."}],
             )
             html = response.choices[0].message.content
@@ -960,17 +964,18 @@ def build_direct_api(model: str, prompt: str, output_path: Path, run_name: str) 
                 track_cost(model, response.usage.prompt_tokens, response.usage.completion_tokens, "builder")
                 
         elif model.startswith("gemini"):
-            import google.generativeai as genai
-            genai.configure(api_key=os.environ.get("GOOGLE_API_KEY", ""))
-            gmodel = genai.GenerativeModel("gemini-2.5-pro")
-            response = gmodel.generate_content(
-                prompt + "\n\nRespond with ONLY the complete HTML file content. No markdown fences, no explanation. Start with <!DOCTYPE html>.",
-                generation_config=genai.types.GenerationConfig(max_output_tokens=32000),
+            from google import genai as google_genai
+            gemini_client = google_genai.Client(api_key=os.environ.get("GOOGLE_API_KEY", ""))
+            gemini_model_id = "gemini-3.1-pro-preview"
+            response = gemini_client.models.generate_content(
+                model=gemini_model_id,
+                contents=prompt + "\n\nRespond with ONLY the complete HTML file content. No markdown fences, no explanation. Start with <!DOCTYPE html>.",
+                config={"max_output_tokens": 32000},
             )
             html = response.text
             # Gemini usage tracking
             if hasattr(response, 'usage_metadata'):
-                track_cost("gemini-2.5-pro",
+                track_cost(gemini_model_id,
                     getattr(response.usage_metadata, 'prompt_token_count', 0),
                     getattr(response.usage_metadata, 'candidates_token_count', 0),
                     "builder")
@@ -1429,8 +1434,8 @@ Save the fixed file to: {build_path}
             try:
                 html_content = build_path.read_text()
                 fix_response = openai_client.chat.completions.create(
-                    model="gpt-4.1" if "gpt" in build.get("model", "") else "gemini-2.5-pro",
-                    max_tokens=32000,
+                    model="gpt-5.4" if "gpt" in build.get("model", "") else "gemini-3.1-pro-preview",
+                    max_completion_tokens=32000,
                     messages=[
                         {"role": "system", "content": "You are fixing HTML/CSS/JS issues in a build. Output ONLY the complete fixed HTML file, no explanation."},
                         {"role": "user", "content": f"{fix_prompt}\n\nCurrent HTML:\n```html\n{html_content[:30000]}\n```"},
