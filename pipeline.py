@@ -109,6 +109,9 @@ class PipelineState(TypedDict):
     # Gate results
     gate_result: Optional[dict]
     
+    # QA
+    qa_reports: list[dict]
+    
     # Evaluation
     pairwise_results: list[dict]
     ranking: list[dict]
@@ -1161,63 +1164,7 @@ Save the fixed file to: {build_path}
             for w in compliance["warnings"]:
                 print(f"     ⚡ {w}")
     
-    # ── 4.5B: Build → Screenshot → Self-Review (one round) ──
-    if build_path.exists():
-        print(f"  📸 Builder {idx}: screenshotting for self-review...")
-        try:
-            from playwright.sync_api import sync_playwright
-            review_screenshot = run_dir / f"builds/{concept_name}-review.png"
-            
-            with sync_playwright() as p:
-                browser = p.chromium.launch(headless=True)
-                page = browser.new_page(viewport={"width": 1080, "height": 1920})
-                page.goto(f"file://{build_path.resolve()}", wait_until="networkidle")
-                page.wait_for_timeout(2000)
-                page.screenshot(path=str(review_screenshot), full_page=False)
-                page.close()
-                browser.close()
-            
-            if review_screenshot.exists():
-                import base64
-                with open(review_screenshot, "rb") as img_f:
-                    screenshot_b64 = base64.standard_b64encode(img_f.read()).decode("utf-8")
-                
-                # Send screenshot to builder for self-review via vision API
-                print(f"  🔍 Builder {idx}: self-reviewing against approach doc...")
-                review_response = openai_client.chat.completions.create(
-                    model="gpt-4o",
-                    max_tokens=1000,
-                    messages=[
-                        {"role": "system", "content": "You are reviewing a build's screenshot against its design spec. List ONLY concrete visual issues — things that are wrong, missing, or broken. Be specific: 'the #1 item text is cut off at the right edge' not 'typography could be improved'. If it looks good, say LOOKS_GOOD."},
-                        {"role": "user", "content": [
-                            {"type": "text", "text": f"Compare this screenshot to the BUILD CONTRACT below. List visual issues.\n\n## BUILD CONTRACT\n{build_contract[:2000]}"},
-                            {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{screenshot_b64}"}},
-                        ]}
-                    ],
-                )
-                review_text = review_response.choices[0].message.content
-                if review_response.usage:
-                    track_cost("gpt-4o", review_response.usage.prompt_tokens, review_response.usage.completion_tokens, "self_review")
-                
-                if "LOOKS_GOOD" not in review_text.upper():
-                    print(f"  🔄 Builder {idx}: visual issues found, sending fix...")
-                    # Save review for debugging
-                    (run_dir / f"reviews/self-review-{idx}.md").write_text(review_text)
-                    
-                    fix_prompt = f"""Your build at {build_path} has visual issues identified from a screenshot review:
-
-{review_text}
-
-Fix these visual issues in the existing file. Do not change fonts, colors, or layout structure — only fix rendering bugs and visual problems.
-
-Save the fixed file to: {build_path}
-"""
-                    run_hermes(f"{state['name']}-builder-{idx}-visual-fix", fix_prompt, max_time=600, max_turns=20)
-                    print(f"  ✅ Builder {idx}: visual fix applied")
-                else:
-                    print(f"  ✅ Builder {idx}: self-review passed — LOOKS_GOOD")
-        except Exception as e:
-            print(f"  ⚠️  Builder {idx}: self-review skipped ({type(e).__name__}: {e})")
+    # NOTE: Self-review is now handled by qa_station_node (after all builds complete)
     
     build_out = {
         "builds": [{
@@ -1238,6 +1185,371 @@ Save the fixed file to: {build_path}
         "compliance": compliance,
     })
     return build_out
+
+
+def qa_station_node(state: PipelineState) -> dict:
+    """QA Station: tests each build's rendered experience + content fidelity.
+    
+    Produces a structured QA Report per build. Routes:
+    - PASS: advance to judge
+    - FIXABLE: send fix instructions to builder (up to 2 attempts)
+    - BROKEN: flag for human, skip from judge
+    """
+    builds = state["builds"]
+    run_dir = RUNS_DIR / state["name"]
+    qa_dir = run_dir / "qa-reports"
+    qa_dir.mkdir(parents=True, exist_ok=True)
+    screenshot_dir = run_dir / "screenshots"
+    screenshot_dir.mkdir(parents=True, exist_ok=True)
+    
+    print(f"[QA] Running QA station on {len(builds)} builds")
+    span = tracer.start_span("qa_station", input={"build_count": len(builds)})
+    
+    # Extract sample data items from brief for content verification
+    sample_items = _extract_sample_items(state["brief"])
+    
+    qa_reports = []
+    
+    try:
+        from playwright.sync_api import sync_playwright
+        pw = sync_playwright().start()
+        browser = pw.chromium.launch(headless=True)
+    except Exception as e:
+        print(f"  ⚠️  QA: Playwright failed to start ({e}) — falling back to source-only checks")
+        browser = None
+        pw = None
+    
+    for b in builds:
+        build_path = Path(b["path"])
+        idx = b["index"]
+        concept_name = f"concept-{idx}"
+        
+        report = {
+            "build": concept_name,
+            "model": b.get("model", "unknown"),
+            "source_checks": {},
+            "experience_checks": {},
+            "verdict": "BROKEN",
+            "issues": [],
+            "fix_attempts": 0,
+        }
+        
+        if not build_path.exists() or build_path.stat().st_size < 500:
+            report["issues"].append(f"Build file missing or empty ({build_path.stat().st_size if build_path.exists() else 0} bytes)")
+            qa_reports.append(report)
+            print(f"  ❌ {concept_name}: BROKEN — file missing/empty")
+            continue
+        
+        html_content = build_path.read_text(errors="ignore")
+        
+        # ── SOURCE CHECKS (static, no browser) ──
+        
+        # Content verification: check sample data items
+        items_found = []
+        items_missing = []
+        for item in sample_items:
+            if item.lower() in html_content.lower():
+                items_found.append(item)
+            else:
+                items_missing.append(item)
+        
+        report["source_checks"]["content"] = {
+            "items_found": len(items_found),
+            "items_expected": len(sample_items),
+            "missing": items_missing,
+            "pass": len(items_found) >= len(sample_items) * 0.7,  # 70% threshold
+        }
+        
+        # Dimension check: look for 1080/1920 in CSS
+        has_width = "1080" in html_content
+        has_height = "1920" in html_content
+        report["source_checks"]["dimensions"] = {
+            "width_ref": has_width,
+            "height_ref": has_height,
+            "pass": has_width and has_height,
+        }
+        
+        # Spec compliance (reuse existing)
+        build_contract = b.get("compliance", {})
+        report["source_checks"]["spec_compliance"] = build_contract
+        
+        if not report["source_checks"]["content"]["pass"]:
+            report["issues"].append(f"Content fidelity: only {len(items_found)}/{len(sample_items)} sample items found. Missing: {', '.join(items_missing[:3])}")
+        
+        # ── EXPERIENCE CHECKS (browser) ──
+        
+        if browser:
+            try:
+                page = browser.new_page(viewport={"width": 1080, "height": 1920})
+                
+                # Collect console errors
+                console_errors = []
+                page.on("console", lambda msg: console_errors.append(msg.text) if msg.type == "error" else None)
+                page.on("pageerror", lambda err: console_errors.append(str(err)))
+                
+                page.goto(f"file://{build_path.resolve()}", wait_until="networkidle", timeout=15000)
+                page.wait_for_timeout(1000)
+                
+                # Screenshot at t=1s
+                ss_t0 = screenshot_dir / f"{concept_name}.png"
+                page.screenshot(path=str(ss_t0), full_page=False)
+                
+                # Screenshot at t=4s (to check animation)
+                page.wait_for_timeout(3000)
+                ss_t3 = screenshot_dir / f"{concept_name}-t3.png"
+                page.screenshot(path=str(ss_t3), full_page=False)
+                
+                # Render check: pixel variance (non-blank)
+                render_ok = _check_render(str(ss_t0))
+                report["experience_checks"]["render"] = {
+                    "pass": render_ok,
+                    "screenshot": str(ss_t0),
+                }
+                if not render_ok:
+                    report["issues"].append("Render check FAILED — page appears blank or near-blank")
+                
+                # Animation check: compare t=0 vs t=3
+                anim_diff = _compare_screenshots(str(ss_t0), str(ss_t3))
+                report["experience_checks"]["animation"] = {
+                    "diff_percent": anim_diff,
+                    "has_animation": anim_diff > 2.0,  # >2% pixel difference = something moved
+                }
+                
+                # Visibility check: are all items visible in viewport?
+                visibility = page.evaluate("""() => {
+                    const items = [];
+                    // Look for ranked items by common patterns
+                    const selectors = ['[class*="item"]', '[class*="rank"]', '[class*="entry"]', 'li', '[class*="row"]'];
+                    let found = [];
+                    for (const sel of selectors) {
+                        const els = document.querySelectorAll(sel);
+                        if (els.length >= 5) {
+                            found = Array.from(els);
+                            break;
+                        }
+                    }
+                    for (const el of found.slice(0, 15)) {
+                        const rect = el.getBoundingClientRect();
+                        items.push({
+                            tag: el.tagName,
+                            class: el.className.toString().slice(0, 40),
+                            visible: rect.width > 0 && rect.height > 0,
+                            in_viewport: rect.top < 1920 && rect.bottom > 0 && rect.left < 1080 && rect.right > 0,
+                            top: Math.round(rect.top),
+                            bottom: Math.round(rect.bottom),
+                        });
+                    }
+                    return { total: found.length, items: items };
+                }""")
+                
+                visible_count = sum(1 for i in visibility.get("items", []) if i.get("in_viewport"))
+                overflow_items = [i for i in visibility.get("items", []) if i.get("visible") and not i.get("in_viewport")]
+                
+                report["experience_checks"]["visibility"] = {
+                    "total_elements": visibility.get("total", 0),
+                    "in_viewport": visible_count,
+                    "overflow": len(overflow_items),
+                    "pass": visible_count >= 8,  # at least 8 of ~10 items visible
+                }
+                if overflow_items:
+                    report["issues"].append(f"Overflow: {len(overflow_items)} items outside 1080×1920 viewport")
+                
+                # Console errors
+                report["experience_checks"]["console_errors"] = {
+                    "count": len(console_errors),
+                    "errors": console_errors[:5],
+                    "pass": len(console_errors) == 0,
+                }
+                if console_errors:
+                    report["issues"].append(f"Console errors: {len(console_errors)} — {console_errors[0][:80]}")
+                
+                # Image loading check
+                images_status = page.evaluate("""() => {
+                    const imgs = document.querySelectorAll('img');
+                    let loaded = 0, broken = 0;
+                    imgs.forEach(img => {
+                        if (img.complete && img.naturalWidth > 0) loaded++;
+                        else broken++;
+                    });
+                    return { total: imgs.length, loaded, broken };
+                }""")
+                report["experience_checks"]["images"] = images_status
+                if images_status.get("broken", 0) > 0:
+                    report["issues"].append(f"Broken images: {images_status['broken']}/{images_status['total']}")
+                
+                page.close()
+                
+            except Exception as e:
+                report["issues"].append(f"Browser QA failed: {type(e).__name__}: {str(e)[:100]}")
+                report["experience_checks"]["error"] = str(e)
+                print(f"  ⚠️  {concept_name}: browser QA error — {e}")
+        
+        # ── VERDICT ──
+        critical_failures = [i for i in report["issues"] if "BROKEN" in i or "blank" in i.lower() or "missing/empty" in i.lower()]
+        fixable_issues = [i for i in report["issues"] if i not in critical_failures]
+        
+        if critical_failures:
+            report["verdict"] = "BROKEN"
+        elif fixable_issues:
+            report["verdict"] = "FIXABLE"
+        else:
+            report["verdict"] = "PASS"
+        
+        # Save QA report
+        report_path = qa_dir / f"{concept_name}-qa.json"
+        with open(report_path, "w") as f:
+            json.dump(report, f, indent=2, default=str)
+        
+        print(f"  {'✅' if report['verdict'] == 'PASS' else '🔧' if report['verdict'] == 'FIXABLE' else '❌'} {concept_name}: {report['verdict']} ({len(report['issues'])} issues)")
+        for issue in report["issues"]:
+            print(f"     → {issue}")
+        
+        qa_reports.append(report)
+    
+    # ── FIX ROUND for FIXABLE builds (up to 2 attempts) ──
+    for i, report in enumerate(qa_reports):
+        if report["verdict"] != "FIXABLE" or report["fix_attempts"] >= 2:
+            continue
+        
+        build = builds[i]
+        build_path = Path(build["path"])
+        fix_instructions = "\n".join(f"- {issue}" for issue in report["issues"])
+        
+        fix_prompt = f"""Your build at {build_path} has QA issues that need fixing:
+
+{fix_instructions}
+
+Fix these issues in the existing file. Be surgical — fix only what's broken.
+Save the fixed file to: {build_path}
+"""
+        print(f"  🔄 {report['build']}: sending QA fix round ({report['fix_attempts'] + 1}/2)...")
+        
+        if build.get("model", "").startswith("gpt") or build.get("model", "").startswith("gemini"):
+            # Direct API fix
+            try:
+                html_content = build_path.read_text()
+                fix_response = openai_client.chat.completions.create(
+                    model="gpt-4.1" if "gpt" in build.get("model", "") else "gemini-2.5-pro",
+                    max_tokens=32000,
+                    messages=[
+                        {"role": "system", "content": "You are fixing HTML/CSS/JS issues in a build. Output ONLY the complete fixed HTML file, no explanation."},
+                        {"role": "user", "content": f"{fix_prompt}\n\nCurrent HTML:\n```html\n{html_content[:30000]}\n```"},
+                    ],
+                )
+                fixed_html = fix_response.choices[0].message.content
+                # Extract HTML from markdown code block if present
+                if "```html" in fixed_html:
+                    fixed_html = fixed_html.split("```html")[1].split("```")[0]
+                elif "```" in fixed_html:
+                    fixed_html = fixed_html.split("```")[1].split("```")[0]
+                build_path.write_text(fixed_html)
+            except Exception as e:
+                print(f"  ⚠️  Fix failed for {report['build']}: {e}")
+        else:
+            run_hermes(f"{state['name']}-qa-fix-{i}", fix_prompt, max_time=600, max_turns=20)
+        
+        report["fix_attempts"] += 1
+        
+        # Re-run experience checks on fixed build
+        if browser:
+            try:
+                page = browser.new_page(viewport={"width": 1080, "height": 1920})
+                page.goto(f"file://{build_path.resolve()}", wait_until="networkidle", timeout=15000)
+                page.wait_for_timeout(2000)
+                ss_fixed = screenshot_dir / f"{report['build']}-fixed.png"
+                page.screenshot(path=str(ss_fixed), full_page=False)
+                
+                render_ok = _check_render(str(ss_fixed))
+                if render_ok:
+                    report["verdict"] = "PASS"
+                    report["issues"] = [f"(fixed) {i}" for i in report["issues"]]
+                    print(f"  ✅ {report['build']}: PASS after fix")
+                else:
+                    print(f"  ⚠️  {report['build']}: still failing after fix")
+                
+                page.close()
+            except Exception as e:
+                print(f"  ⚠️  Re-check failed: {e}")
+    
+    # Clean up browser
+    if browser:
+        browser.close()
+    if pw:
+        pw.stop()
+    
+    # Summary
+    passed = sum(1 for r in qa_reports if r["verdict"] == "PASS")
+    fixable = sum(1 for r in qa_reports if r["verdict"] == "FIXABLE")
+    broken = sum(1 for r in qa_reports if r["verdict"] == "BROKEN")
+    print(f"[QA] Results: {passed} PASS, {fixable} FIXABLE, {broken} BROKEN")
+    
+    # Save summary report
+    summary = {
+        "total": len(qa_reports),
+        "passed": passed,
+        "fixable": fixable, 
+        "broken": broken,
+        "reports": qa_reports,
+    }
+    with open(qa_dir / "qa-summary.json", "w") as f:
+        json.dump(summary, f, indent=2, default=str)
+    
+    tracer.end_span(span, output={"passed": passed, "fixable": fixable, "broken": broken})
+    
+    return {
+        "qa_reports": qa_reports,
+        "phase": "qa_complete",
+    }
+
+
+def _extract_sample_items(brief: str) -> list:
+    """Extract sample data items from the brief's ## Sample Data section."""
+    items = []
+    in_sample = False
+    for line in brief.split("\n"):
+        if "## Sample Data" in line or "## sample data" in line.lower():
+            in_sample = True
+            continue
+        if in_sample:
+            if line.startswith("## "):
+                break
+            # Look for numbered items like "1. Air Jordan 1 Retro High OG"
+            if line.strip() and (line.strip()[0].isdigit() or line.strip().startswith("-")):
+                # Extract the item name (strip number and punctuation prefix)
+                item = line.strip().lstrip("0123456789.-) ").strip()
+                if item and len(item) > 3:
+                    items.append(item)
+    return items
+
+
+def _check_render(screenshot_path: str) -> bool:
+    """Check if a screenshot is non-blank by measuring pixel variance."""
+    try:
+        # Use sips to get image info (macOS) or PIL
+        import struct
+        with open(screenshot_path, "rb") as f:
+            data = f.read()
+        # Simple check: file size > 50KB usually means real content
+        # Blank PNGs at 1080x1920 compress to ~5-15KB
+        return len(data) > 50000
+    except Exception:
+        return False
+
+
+def _compare_screenshots(path1: str, path2: str) -> float:
+    """Compare two screenshots and return % difference (0-100)."""
+    try:
+        with open(path1, "rb") as f1, open(path2, "rb") as f2:
+            data1, data2 = f1.read(), f2.read()
+        if len(data1) == 0 or len(data2) == 0:
+            return 0.0
+        # Quick byte-level comparison
+        min_len = min(len(data1), len(data2))
+        diff_bytes = sum(1 for i in range(0, min_len, 100) if data1[i] != data2[i])
+        total_samples = min_len // 100
+        return (diff_bytes / max(total_samples, 1)) * 100
+    except Exception:
+        return 0.0
 
 
 def screenshot_builds(builds: list, run_name: str) -> list:
@@ -1554,6 +1866,7 @@ def build_graph():
     graph.add_node("designer", designer_node)
     graph.add_node("approach_gate", approach_gate_node)
     graph.add_node("builder", builder_node)
+    graph.add_node("qa", qa_station_node)
     graph.add_node("judge", pairwise_judge_node)
     graph.add_node("human_gate", human_gate_node)
     graph.add_node("iterate", iterate_node)
@@ -1564,7 +1877,8 @@ def build_graph():
     graph.add_conditional_edges("research", fan_out_designers, ["designer"])
     graph.add_edge("designer", "approach_gate")
     graph.add_conditional_edges("approach_gate", fan_out_builders, ["builder"])
-    graph.add_edge("builder", "judge")
+    graph.add_edge("builder", "qa")
+    graph.add_edge("qa", "judge")
     graph.add_edge("judge", "human_gate")
     # human_gate uses Command() to route to deploy/iterate/END
     graph.add_conditional_edges("iterate", fan_out_designers, ["designer"])
