@@ -1040,11 +1040,11 @@ def build_direct_api(model: str, prompt: str, output_path: Path, run_name: str, 
             if image_parts:
                 from google.genai import types as genai_types
                 parts = []
-                parts.append(genai_types.Part.from_text("## MOODBOARD REFERENCE IMAGES\nStudy these — your build should feel like it belongs in this visual family:\n"))
+                parts.append(genai_types.Part.from_text(text="## MOODBOARD REFERENCE IMAGES\nStudy these — your build should feel like it belongs in this visual family:\n"))
                 for img in image_parts:
-                    parts.append(genai_types.Part.from_text(f"**{img['name']}:**"))
+                    parts.append(genai_types.Part.from_text(text=f"**{img['name']}:**"))
                     parts.append(genai_types.Part.from_bytes(data=base64.standard_b64decode(img["b64"]), mime_type=img["mime"]))
-                parts.append(genai_types.Part.from_text(prompt + suffix))
+                parts.append(genai_types.Part.from_text(text=prompt + suffix))
                 contents = parts
             else:
                 contents = prompt + suffix
