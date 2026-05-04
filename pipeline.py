@@ -49,6 +49,25 @@ openai_client = OpenAI()
 MAX_COST_USD = 20.0
 MAX_ITERATIONS = 3
 
+# ── Pinned Model Versions ──────────────────────────────────────
+# Use dated snapshots where available to prevent silent behavior changes.
+# Update these explicitly after testing new versions.
+# Last updated: 2026-05-04
+PINNED_MODELS = {
+    # Builders
+    "claude-opus": "claude-opus-4-6",              # Anthropic: pinned to 4.6
+    "gpt-5.4": "gpt-5.4-2026-03-05",              # OpenAI: pinned snapshot (verified)
+    "gemini-3.1-pro-preview": "gemini-3.1-pro-preview",  # Google: no dated snapshots yet
+    # Judge
+    "gpt-4o": "gpt-4o-2024-11-20",                # Pinned for evaluation consistency
+    # Self-review / vision
+    "gpt-4o-vision": "gpt-4o-2024-11-20",
+}
+
+def resolve_model(alias: str) -> str:
+    """Resolve a model alias to its pinned version."""
+    return PINNED_MODELS.get(alias, alias)
+
 # Cost per 1M tokens (approximate, 2026 pricing)
 COST_PER_1M = {
     "claude-opus-4-6": {"input": 15.0, "output": 75.0},
@@ -1245,7 +1264,7 @@ def approach_gate_node(state: PipelineState) -> dict:
     ])
     
     msg = anthropic_client.messages.create(
-        model="claude-opus-4-6",
+        model=resolve_model("claude-opus"),
         max_tokens=2000,
         messages=[{"role": "user", "content": f"""You are a creative director reviewing 3 approach docs. You must be HARSH and CRITICAL.
 
@@ -1595,8 +1614,9 @@ def build_direct_api(model: str, prompt: str, output_path: Path, run_name: str, 
             else:
                 messages = [{"role": "user", "content": prompt + suffix}]
             
+            resolved_model = resolve_model(model)
             response = openai_client.chat.completions.create(
-                model=model,
+                model=resolved_model,
                 max_completion_tokens=32000,
                 messages=messages,
             )
@@ -1607,7 +1627,7 @@ def build_direct_api(model: str, prompt: str, output_path: Path, run_name: str, 
         elif model.startswith("gemini"):
             from google import genai as google_genai
             gemini_client = google_genai.Client(api_key=os.environ.get("GOOGLE_API_KEY", ""))
-            gemini_model_id = "gemini-3.1-pro-preview"
+            gemini_model_id = resolve_model("gemini-3.1-pro-preview")
             
             # Build multimodal content for Gemini
             if image_parts:
@@ -1673,8 +1693,9 @@ def build_direct_api(model: str, prompt: str, output_path: Path, run_name: str, 
                 elif model.startswith("gemini"):
                     from google import genai as google_genai
                     gemini_client = google_genai.Client(api_key=os.environ.get("GOOGLE_API_KEY", ""))
+                    resolved_gemini = resolve_model("gemini-3.1-pro-preview")
                     response = gemini_client.models.generate_content(
-                        model="gemini-3.1-pro-preview",
+                        model=resolved_gemini,
                         contents=prompt + "\n\nRespond with ONLY the complete HTML file content. No markdown fences, no explanation. Start with <!DOCTYPE html>.",
                         config={"max_output_tokens": 32000},
                     )
@@ -2252,19 +2273,40 @@ Save the fixed file to: {build_path}
 """
         print(f"  🔄 {report['build']}: sending QA fix round ({report['fix_attempts'] + 1}/2)...")
         
-        if build.get("model", "").startswith("gpt") or build.get("model", "").startswith("gemini"):
+        build_model = build.get("model", "")
+        if build_model.startswith("gpt") or build_model.startswith("gemini"):
             # Direct API fix
             try:
                 html_content = build_path.read_text()
-                fix_response = openai_client.chat.completions.create(
-                    model="gpt-5.4" if "gpt" in build.get("model", "") else "gemini-3.1-pro-preview",
-                    max_completion_tokens=32000,
-                    messages=[
-                        {"role": "system", "content": "You are fixing HTML/CSS/JS issues in a build. Output ONLY the complete fixed HTML file, no explanation."},
-                        {"role": "user", "content": f"{fix_prompt}\n\nCurrent HTML:\n```html\n{html_content[:30000]}\n```"},
-                    ],
-                )
-                fixed_html = fix_response.choices[0].message.content
+                fix_system = "You are fixing HTML/CSS/JS issues in a build. Output ONLY the complete fixed HTML file, no explanation."
+                fix_user = f"{fix_prompt}\n\nCurrent HTML:\n```html\n{html_content[:30000]}\n```"
+                
+                if build_model.startswith("gemini"):
+                    # Use Google genai SDK for Gemini (NOT OpenAI client — causes 404)
+                    from google import genai as google_genai
+                    from google.genai import types as genai_types
+                    gemini_client = google_genai.Client()
+                    gemini_response = gemini_client.models.generate_content(
+                        model=PINNED_MODELS.get("gemini-3.1-pro-preview", "gemini-3.1-pro-preview"),
+                        contents=[genai_types.Part.from_text(text=f"{fix_system}\n\n{fix_user}")],
+                        config=genai_types.GenerateContentConfig(max_output_tokens=32000),
+                    )
+                    fixed_html = ""
+                    for part in gemini_response.candidates[0].content.parts:
+                        if hasattr(part, 'text') and part.text:
+                            fixed_html += part.text
+                else:
+                    # OpenAI API for GPT models
+                    fix_response = openai_client.chat.completions.create(
+                        model=PINNED_MODELS.get("gpt-5.4", "gpt-5.4"),
+                        max_completion_tokens=32000,
+                        messages=[
+                            {"role": "system", "content": fix_system},
+                            {"role": "user", "content": fix_user},
+                        ],
+                    )
+                    fixed_html = fix_response.choices[0].message.content
+                
                 # Extract HTML from markdown code block if present
                 if "```html" in fixed_html:
                     fixed_html = fixed_html.split("```html")[1].split("```")[0]
@@ -2438,7 +2480,7 @@ def pairwise_judge_node(state: PipelineState) -> dict:
     persona = persona_path.read_text() if persona_path.exists() else ""
     
     # Use OpenAI as judge (cross-model — builders are Claude/Hermes)
-    judge_model = "gpt-4o"
+    judge_model = resolve_model("gpt-4o")
     
     judge_system = f"""{persona}
 
@@ -2588,8 +2630,352 @@ Then explain in 3-5 sentences WHY, citing specific visual elements you see in th
     return judge_out
 
 
+def generate_eval_app_for_run(state: PipelineState) -> Optional[str]:
+    """Generate and deploy mobile evaluation app for human gate.
+    
+    Returns deployed URL or None on failure.
+    """
+    run_dir = RUNS_DIR / state["name"]
+    builds_dir = run_dir / "builds"
+    
+    if not builds_dir.exists():
+        print("  ⚠️  No builds dir — skipping eval app generation")
+        return None
+    
+    try:
+        # Import the eval app generator
+        sys.path.insert(0, str(PIPELINE_DIR))
+        from importlib import import_module
+        eval_mod_path = PIPELINE_DIR / "generate-eval-app.py"
+        if not eval_mod_path.exists():
+            print("  ⚠️  generate-eval-app.py not found — skipping eval app")
+            return None
+        
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("generate_eval_app", str(eval_mod_path))
+        eval_mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(eval_mod)
+        
+        # Generate eval app
+        deploy_dir = run_dir / "eval"
+        deploy_dir.mkdir(parents=True, exist_ok=True)
+        
+        # Copy builds into eval dir for deployment
+        eval_builds = deploy_dir / "builds"
+        eval_builds.mkdir(exist_ok=True)
+        for html_file in builds_dir.glob("concept-*.html"):
+            import shutil
+            shutil.copy2(html_file, eval_builds / html_file.name)
+        
+        # Inject model info into builds list
+        builds_with_models = []
+        ranking = state.get("ranking", [])
+        model_map = {}
+        for r in ranking:
+            idx = r.get("build_index", r.get("index", -1))
+            model_map[idx] = r.get("model", "unknown")
+        
+        html = eval_mod.generate_eval_html(run_dir)
+        eval_html_path = deploy_dir / "index.html"
+        eval_html_path.write_text(html)
+        
+        # Deploy via here-now
+        publish_script = WORKSPACE / ".." / ".agents/skills/here-now/scripts/publish.sh"
+        if publish_script.exists():
+            result = subprocess.run(
+                ["bash", str(publish_script), str(deploy_dir)],
+                capture_output=True, text=True, timeout=60
+            )
+            # Parse URL from output
+            for line in result.stdout.split("\n"):
+                if "here.now" in line and "://" in line:
+                    url = line.strip()
+                    if url.startswith("https://"):
+                        print(f"  🎨 Eval app deployed: {url}")
+                        return url
+        
+        print(f"  📁 Eval app generated locally: {eval_html_path}")
+        return str(eval_html_path)
+        
+    except Exception as e:
+        print(f"  ⚠️  Eval app generation failed (non-fatal): {e}")
+        return None
+
+
+def load_structured_verdict(run_name: str) -> Optional[dict]:
+    """Load structured verdict.json from run directory if it exists.
+    
+    Returns parsed verdict dict or None.
+    """
+    verdict_path = RUNS_DIR / run_name / "verdict.json"
+    if verdict_path.exists():
+        try:
+            verdict = json.loads(verdict_path.read_text())
+            print(f"  📋 Loaded structured verdict from {verdict_path.name}")
+            return verdict
+        except Exception as e:
+            print(f"  ⚠️  Failed to parse verdict.json: {e}")
+    return None
+
+
+def append_to_calibration_set(state: PipelineState, verdict_data: dict):
+    """Append structured verdict to calibration-set.json for cross-run learning.
+    
+    Each rated concept becomes a calibration entry.
+    """
+    cal_path = PIPELINE_DIR / "memory" / "calibration-set.json"
+    cal_path.parent.mkdir(parents=True, exist_ok=True)
+    
+    try:
+        if cal_path.exists():
+            cal = json.loads(cal_path.read_text())
+        else:
+            cal = {
+                "_schema": "calibration-set-v1",
+                "rated_by": "creative-director",
+                "rated_at": time.strftime("%Y-%m-%d"),
+                "count": 0,
+                "distribution": {"great": 0, "acceptable": 0, "bad": 0},
+                "ratings": [],
+                "taste_notes": {}
+            }
+        
+        run_name = state["name"]
+        run_dir = RUNS_DIR / run_name
+        
+        for concept in verdict_data.get("concepts", []):
+            rating = concept.get("rating", "unrated")
+            if rating == "unrated":
+                continue
+            
+            # Map great→great, ok→acceptable, bad→bad
+            cal_rating = {"great": "great", "ok": "acceptable", "bad": "bad"}.get(rating, rating)
+            
+            entry = {
+                "run": run_name,
+                "concept": concept.get("index", -1),
+                "model": concept.get("model", "unknown"),
+                "rating": cal_rating,
+                "dimensions": concept.get("dimensions", {}),
+                "techniques": concept.get("techniques", {}),
+                "note": concept.get("note", ""),
+                "timestamp": verdict_data.get("timestamp", time.strftime("%Y-%m-%dT%H:%M:%SZ")),
+                "build_file": f"builds/concept-{concept.get('index', 0)}.html",
+            }
+            
+            cal["ratings"].append(entry)
+            cal["count"] = len(cal["ratings"])
+            
+            # Update distribution
+            if cal_rating in cal["distribution"]:
+                cal["distribution"][cal_rating] = sum(
+                    1 for r in cal["ratings"] if r.get("rating") == cal_rating
+                )
+        
+        cal["rated_at"] = time.strftime("%Y-%m-%d")
+        cal_path.write_text(json.dumps(cal, indent=2))
+        
+        rated_count = sum(1 for c in verdict_data.get("concepts", []) if c.get("rating") != "unrated")
+        print(f"  📊 Calibration set updated: +{rated_count} entries → {cal['count']} total")
+        
+    except Exception as e:
+        print(f"  ⚠️  Calibration set update failed (non-fatal): {e}")
+
+
+def wiki_ingest_structured(state: dict, verdict_data: dict):
+    """Enhanced wiki ingest using structured verdict data.
+    
+    Routes per-concept, per-dimension, per-technique feedback to wiki pages.
+    Falls back to basic wiki_ingest if structured data is incomplete.
+    """
+    import re
+    WIKI_DIR.mkdir(parents=True, exist_ok=True)
+    
+    run_name = state["name"]
+    decision = verdict_data.get("verdict", "reject")
+    overall_note = verdict_data.get("overall_note", "")
+    concepts = verdict_data.get("concepts", [])
+    ranking = state.get("ranking", [])
+    cost = state.get("cost_usd", 0)
+    iteration = state.get("iteration", 0)
+    design_system = "SMPLX" if state.get("design_system") else "none"
+    
+    # 1. Write detailed run summary
+    runs_dir = WIKI_DIR / "runs"
+    runs_dir.mkdir(parents=True, exist_ok=True)
+    
+    summary_lines = [f"# Run: {run_name}", ""]
+    summary_lines.append(f"- **Date:** {time.strftime('%Y-%m-%d %H:%M')}")
+    summary_lines.append(f"- **Verdict:** {decision}")
+    summary_lines.append(f"- **Iteration:** {iteration}")
+    summary_lines.append(f"- **Cost:** ${cost:.2f}")
+    summary_lines.append(f"- **Design System:** {design_system}")
+    summary_lines.append(f"- **Best Concept:** {verdict_data.get('best_concept', '?')}")
+    summary_lines.append("")
+    
+    if overall_note:
+        summary_lines.append(f"## Overall Note")
+        summary_lines.append(f"> {overall_note}")
+        summary_lines.append("")
+    
+    # Per-concept structured feedback
+    summary_lines.append("## Concepts (Structured Feedback)")
+    for c in concepts:
+        idx = c.get("index", "?")
+        model = c.get("model", "unknown")
+        rating = c.get("rating", "unrated")
+        rating_emoji = {"great": "🔥", "ok": "✅", "bad": "❌"}.get(rating, "⬜")
+        
+        summary_lines.append(f"\n### Concept {idx} ({model}) — {rating_emoji} {rating}")
+        
+        dims = c.get("dimensions", {})
+        if dims:
+            summary_lines.append("**Dimensions:**")
+            for k, v in dims.items():
+                label = k.replace("_", " ").title()
+                dots = "●" * v + "○" * (5 - v) if isinstance(v, int) else str(v)
+                summary_lines.append(f"- {label}: {dots} ({v}/5)")
+        
+        techs = c.get("techniques", {})
+        if techs:
+            summary_lines.append("**Techniques:**")
+            tech_icons = {"landed": "✅", "standout": "🔥", "partial": "⚠️", "missed": "❌"}
+            for tech, status in techs.items():
+                summary_lines.append(f"- {tech_icons.get(status, '○')} {tech} → {status}")
+        
+        note = c.get("note", "")
+        if note:
+            summary_lines.append(f"**CD Note:** > \"{note}\"")
+        summary_lines.append("")
+    
+    run_summary_path = runs_dir / f"{run_name}.md"
+    run_summary_path.write_text("\n".join(summary_lines))
+    
+    # 2. Update log
+    log_path = WIKI_DIR / "log.md"
+    log_entry = f"\n## [{time.strftime('%Y-%m-%d')}] ingest | {run_name}\n"
+    log_entry += f"Verdict: {decision}. Cost: ${cost:.2f}. "
+    ratings_summary = ", ".join(
+        f"C{c['index']}({c.get('model','?')})={c.get('rating','?')}" for c in concepts
+    )
+    log_entry += f"Ratings: {ratings_summary}. "
+    if overall_note:
+        log_entry += f'Note: "{overall_note[:100]}"'
+    log_entry += "\n"
+    
+    if log_path.exists():
+        with open(log_path, "a") as f:
+            f.write(log_entry)
+    
+    # 3. Route technique feedback to technique pages
+    for c in concepts:
+        for tech_name, status in c.get("techniques", {}).items():
+            tech_slug = tech_name.lower().replace(" ", "-").replace("/", "-")
+            tech_path = WIKI_DIR / f"techniques/{tech_slug}.md"
+            
+            evidence = f"- [{status}] Run {run_name}, Concept {c['index']} ({c.get('model', '?')})"
+            if c.get("note"):
+                evidence += f" — \"{c['note'][:100]}\""
+            evidence += f" ({time.strftime('%Y-%m-%d')})"
+            
+            if tech_path.exists():
+                content = tech_path.read_text()
+                if "## Evidence" in content:
+                    content = content.replace("## Evidence", f"## Evidence\n{evidence}")
+                else:
+                    content = content.rstrip() + f"\n\n## Evidence\n{evidence}\n"
+                tech_path.write_text(content)
+            else:
+                # Create new technique page
+                status_map = {"standout": "proven", "landed": "promising", "partial": "experimental", "missed": "untested"}
+                new_page = f"# Technique: {tech_name}\n\n"
+                new_page += f"**Status:** {status_map.get(status, 'experimental')}\n\n"
+                new_page += f"## Evidence\n{evidence}\n"
+                tech_path.write_text(new_page)
+    
+    # 4. Route dimension feedback to model pages + aesthetic pages
+    for c in concepts:
+        model = c.get("model", "unknown")
+        model_name = {
+            "claude-opus": "claude-opus",
+            "gpt-5.4": "gpt-5.4",
+            "gemini-3.1-pro": "gemini-3.1-pro",
+            "gemini-3.1-pro-preview": "gemini-3.1-pro",
+        }.get(model, model)
+        
+        model_page = WIKI_DIR / f"models/{model_name}.md"
+        if model_page.exists():
+            content = model_page.read_text()
+            rating = c.get("rating", "unrated")
+            rating_emoji = {"great": "🔥", "ok": "✅", "bad": "❌"}.get(rating, "⬜")
+            dims = c.get("dimensions", {})
+            dims_str = "/".join(f"{v}" for v in dims.values()) if dims else "—"
+            note_snippet = c.get("note", "")[:80]
+            
+            new_row = f"| {run_name} | Builder {c['index']} | {rating_emoji} {rating} | {decision} | {dims_str} | {note_snippet} |"
+            
+            if "## Performance History" in content:
+                content = content.rstrip() + f"\n{new_row}\n"
+                model_page.write_text(content)
+        
+        # Update anti-patterns from bad-rated concepts
+        dims = c.get("dimensions", {})
+        note = c.get("note", "")
+        rating = c.get("rating", "unrated")
+        
+        if rating == "bad" and note:
+            ap_path = WIKI_DIR / "aesthetics/anti-patterns.md"
+            if ap_path.exists():
+                content = ap_path.read_text()
+                entry = f"\n### {run_name} C{c['index']} ({model}) — auto-ingested\n"
+                entry += f"- **Rating:** ❌ bad\n"
+                entry += f"- **CD Note:** > \"{note[:200]}\"\n"
+                low_dims = [k.replace("_", " ").title() for k, v in dims.items() if isinstance(v, int) and v <= 2]
+                if low_dims:
+                    entry += f"- **Weak dimensions:** {', '.join(low_dims)}\n"
+                entry += f"- **Date:** {time.strftime('%Y-%m-%d')}\n"
+                content = content.rstrip() + "\n" + entry
+                ap_path.write_text(content)
+        
+        # Update what-scores-well from great-rated concepts
+        if rating == "great" and note:
+            ws_path = WIKI_DIR / "aesthetics/what-scores-well.md"
+            if ws_path.exists():
+                content = ws_path.read_text()
+                entry = f"\n### {run_name} C{c['index']} ({model}) — auto-ingested\n"
+                entry += f"- **Rating:** 🔥 great\n"
+                entry += f"- **Dimensions:** {', '.join(f'{k.replace(chr(95), chr(32)).title()} {v}/5' for k, v in dims.items())}\n"
+                entry += f"- **CD Note:** > \"{note[:200]}\"\n"
+                standout_techs = [t for t, s in c.get("techniques", {}).items() if s == "standout"]
+                if standout_techs:
+                    entry += f"- **Standout techniques:** {', '.join(standout_techs)}\n"
+                entry += f"- **Date:** {time.strftime('%Y-%m-%d')}\n"
+                content = content.rstrip() + "\n" + entry
+                ws_path.write_text(content)
+    
+    # 5. Update wiki index
+    index_path = WIKI_DIR / "index.md"
+    if index_path.exists():
+        content = index_path.read_text()
+        if run_name not in content:
+            if "## Run Summaries" in content:
+                content = content.replace(
+                    "## Run Summaries",
+                    f"## Run Summaries\n- [{run_name}](runs/{run_name}.md) — {decision}"
+                )
+            index_path.write_text(content)
+    
+    rated = sum(1 for c in concepts if c.get("rating") != "unrated")
+    techniques_routed = sum(len(c.get("techniques", {})) for c in concepts)
+    print(f"  📚 Wiki ingested (structured): {rated} rated concepts, {techniques_routed} technique tags routed")
+
+
 def human_gate_node(state: PipelineState) -> Command:
-    """Phase 7: Pause for human taste review."""
+    """Phase 7: Pause for human taste review.
+    
+    Auto-generates and deploys mobile eval app, then pauses.
+    On resume: reads structured verdict.json if available, auto-ingests to wiki + calibration.
+    """
     print(f"\n{'='*60}")
     print(f"HUMAN GATE — Iteration {state.get('iteration', 0)}")
     print(f"{'='*60}")
@@ -2604,11 +2990,16 @@ def human_gate_node(state: PipelineState) -> Command:
         winner = f"→ concept {pr['winner']}" if pr["winner"] is not None else "→ tie"
         print(f"  {pr['pair'][0]} vs {pr['pair'][1]}: {agreed} {winner}")
     
-    print(f"\nBuilds at: {RUNS_DIR / state['name'] / 'builds'}")
-    print(f"{'='*60}\n")
-    
     # Save cost report before pausing
     save_cost_report(state["name"])
+    
+    # Auto-generate and deploy eval app
+    eval_url = generate_eval_app_for_run(state)
+    
+    print(f"\nBuilds at: {RUNS_DIR / state['name'] / 'builds'}")
+    if eval_url:
+        print(f"Eval app: {eval_url}")
+    print(f"{'='*60}\n")
     
     # This pauses the pipeline until resumed
     decision = interrupt({
@@ -2616,19 +3007,36 @@ def human_gate_node(state: PipelineState) -> Command:
         "ranking": state.get("ranking", []),
         "pairwise_results": state.get("pairwise_results", []),
         "builds_dir": str(RUNS_DIR / state["name"] / "builds"),
+        "eval_url": eval_url,
         "iteration": state.get("iteration", 0),
-        "message": "Review the builds. Respond with: approve / iterate / reject",
+        "message": f"Review builds at eval app: {eval_url or 'N/A'}. Submit verdict.json to run dir, then resume.",
     })
     
     human_decision = decision.get("decision", "reject") if isinstance(decision, dict) else str(decision)
     human_feedback = decision.get("feedback", "") if isinstance(decision, dict) else ""
+    
+    # Check for structured verdict.json (auto-written by eval app flow)
+    structured_verdict = load_structured_verdict(state["name"])
+    
+    if structured_verdict:
+        # Override decision/feedback from structured verdict
+        human_decision = structured_verdict.get("verdict", human_decision)
+        human_feedback = structured_verdict.get("overall_note", human_feedback)
+        
+        # Per-concept notes as combined feedback if no overall note
+        if not human_feedback:
+            concept_notes = [
+                f"C{c['index']}: {c['note']}" 
+                for c in structured_verdict.get("concepts", []) if c.get("note")
+            ]
+            human_feedback = " | ".join(concept_notes)
     
     # Langfuse: score the run with human decision
     decision_scores = {"approve": 1.0, "iterate": 0.5, "reject": 0.0}
     tracer.score("human_decision", decision_scores.get(human_decision, 0.0),
                  comment=f"{human_decision}: {human_feedback[:200]}")
     
-    # Record verdict to technique registry (cross-run learning — legacy)
+    # Record verdict to technique registry (legacy — kept for backwards compat)
     record_verdict(
         run_name=state["name"],
         decision=human_decision,
@@ -2638,9 +3046,13 @@ def human_gate_node(state: PipelineState) -> Command:
         approaches=state.get("approaches", []),
     )
     
-    # Ingest run results into the wiki (compounding knowledge base)
+    # Ingest into wiki — use structured version if available, else basic
     try:
-        wiki_ingest(state, human_decision, human_feedback)
+        if structured_verdict:
+            wiki_ingest_structured(state, structured_verdict)
+            append_to_calibration_set(state, structured_verdict)
+        else:
+            wiki_ingest(state, human_decision, human_feedback)
     except Exception as e:
         print(f"  ⚠️  Wiki ingest failed (non-fatal): {e}")
     

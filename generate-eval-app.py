@@ -5,7 +5,7 @@ Reads build artifacts from a run directory and produces a self-contained HTML ap
 that captures structured per-concept, per-dimension, technique-level feedback.
 
 Usage:
-  python generate-eval-app.py --run-dir ../runs/my-run --output /tmp/eval-app.html
+  python generate-eval-app.py --run-dir ../overnight-runs/sharecard-v3k-smplx --output /tmp/eval-app.html
 """
 
 import argparse
