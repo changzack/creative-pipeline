@@ -29,3 +29,7 @@ Thumbs.db
 # IDE
 .vscode/
 .idea/
+
+# Exception: wiki build pages ARE tracked
+!wiki/builds/
+!wiki/builds/*.md
