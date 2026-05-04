@@ -1752,6 +1752,9 @@ def builder_node(state: dict) -> dict:
     # Load proven code recipes for implementation guidance
     recipes = load_reference("recipes.md")
     
+    # Load wiki context for builder (what scores well, anti-patterns, technique evidence)
+    wiki_context = get_wiki_context(state["brief"], max_chars=4000)  # Shorter for builder — it's supplementary
+    
     # 4.5C: Identify moodboard images for builder reference
     moodboard_dir = run_dir / "moodboard"
     all_moodboard = []
@@ -1844,7 +1847,7 @@ If verification fails, your build is rejected and you must redo it.
 
 ---
 
-{"## ⛔ DESIGN SYSTEM ENFORCEMENT (automated checking — violations = rejection)" + chr(10) + "Your build will be scanned for design system compliance. ONLY the following fonts and colors are allowed:" + chr(10) + state.get('design_system', '') + chr(10) + "Any font-family not in this system = REJECTION. Any hex color not in this palette (or within tolerance) = REJECTION." + chr(10) if state.get('design_system') else ""}## Build Rules
+{"## ⛔ DESIGN SYSTEM ENFORCEMENT (automated checking — violations = rejection)" + chr(10) + "Your build will be scanned for design system compliance. ONLY the following fonts and colors are allowed:" + chr(10) + state.get('design_system', '') + chr(10) + "Any font-family not in this system = REJECTION. Any hex color not in this palette (or within tolerance) = REJECTION." + chr(10) if state.get('design_system') else ""}{('## 📚 CREATIVE DIRECTOR FEEDBACK — What Works & What Fails (from past runs)' + chr(10) + wiki_context + chr(10)) if wiki_context else ''}## Build Rules
 1. IMPLEMENT every technique in the Build Contract — visible on screen, not just in code
 2. Use ONLY the fonts listed in REQUIRED FONTS. Using any font from FORBIDDEN FONTS = automatic rejection.
 3. Use ONLY the colors listed in REQUIRED COLORS as your primary palette. Using colors from "Must NOT contain" = automatic rejection.
@@ -2968,6 +2971,142 @@ def wiki_ingest_structured(state: dict, verdict_data: dict):
     rated = sum(1 for c in concepts if c.get("rating") != "unrated")
     techniques_routed = sum(len(c.get("techniques", {})) for c in concepts)
     print(f"  📚 Wiki ingested (structured): {rated} rated concepts, {techniques_routed} technique tags routed")
+    
+    # 6. Check if it's time for a persona amendment proposal (every 5 runs)
+    try:
+        generate_persona_amendment_proposal(run_name)
+    except Exception as e:
+        print(f"  ⚠️  Persona amendment check failed (non-fatal): {e}")
+
+
+def generate_persona_amendment_proposal(current_run: str):
+    """Every 5 runs, generate a proposal for persona file updates.
+    
+    Reads accumulated wiki evidence and proposes specific edits to
+    BUILDER.md and REVIEWER.md. Saved as a proposal file for human review.
+    Does NOT auto-apply — human gate required (Constitutional AI pattern).
+    """
+    proposals_dir = WIKI_DIR / "proposals"
+    proposals_dir.mkdir(parents=True, exist_ok=True)
+    
+    # Count runs in wiki log
+    log_path = WIKI_DIR / "log.md"
+    if not log_path.exists():
+        return
+    
+    log_content = log_path.read_text()
+    run_count = log_content.count("] ingest |")
+    
+    # Only generate every 5 runs
+    if run_count % 5 != 0 or run_count == 0:
+        return
+    
+    print(f"  📝 Generating persona amendment proposal (run #{run_count})...")
+    
+    # Collect evidence from wiki
+    evidence = {"what_works": "", "anti_patterns": "", "model_notes": ""}
+    
+    ws_path = WIKI_DIR / "aesthetics/what-scores-well.md"
+    if ws_path.exists():
+        evidence["what_works"] = ws_path.read_text()[-3000:]  # Recent entries
+    
+    ap_path = WIKI_DIR / "aesthetics/anti-patterns.md"
+    if ap_path.exists():
+        evidence["anti_patterns"] = ap_path.read_text()[-3000:]
+    
+    # Collect recent technique evidence
+    tech_evidence = []
+    tech_dir = WIKI_DIR / "techniques"
+    if tech_dir.exists():
+        for tp in tech_dir.glob("*.md"):
+            content = tp.read_text()
+            if "standout" in content.lower() or "missed" in content.lower():
+                tech_evidence.append(f"### {tp.stem}\n{content[-500:]}")
+    
+    # Read current personas
+    builder_path = WORKSPACE / "skills/creative-technologist/personas/BUILDER.md"
+    reviewer_path = WORKSPACE / "skills/creative-technologist/personas/REVIEWER.md"
+    
+    builder_current = builder_path.read_text() if builder_path.exists() else ""
+    reviewer_current = reviewer_path.read_text() if reviewer_path.exists() else ""
+    
+    # Generate proposal document
+    proposal = f"""# Persona Amendment Proposal — Run #{run_count}
+Generated: {time.strftime('%Y-%m-%d %H:%M')}
+Trigger: {current_run} (every 5 runs)
+
+## Status: PENDING HUMAN REVIEW
+⚠️ Do NOT auto-apply. Review each proposed change and approve/reject individually.
+
+---
+
+## Evidence Summary (from wiki)
+
+### What Scores Well (recent)
+{evidence['what_works'][-1500:] if evidence['what_works'] else '(no data)'}
+
+### Anti-Patterns (recent)
+{evidence['anti_patterns'][-1500:] if evidence['anti_patterns'] else '(no data)'}
+
+### Technique Evidence
+{chr(10).join(tech_evidence[-5:]) if tech_evidence else '(no technique data)'}
+
+---
+
+## Proposed Changes to BUILDER.md
+
+Review the evidence above and consider whether BUILDER.md should be updated with:
+
+1. **New anti-patterns to add to builder's "don't do" list:**
+   - [Review anti-patterns above — any new patterns that builders keep hitting?]
+
+2. **New techniques to emphasize:**
+   - [Review what-scores-well — any techniques that consistently get "standout" tags?]
+
+3. **New build rules based on failures:**
+   - [Review technique evidence — any "missed" techniques that should become harder requirements?]
+
+### Current BUILDER.md (first 2000 chars for reference):
+```
+{builder_current[:2000]}
+```
+
+---
+
+## Proposed Changes to REVIEWER.md
+
+Review the evidence above and consider whether REVIEWER.md should be updated with:
+
+1. **Scoring weight adjustments:**
+   - [Has the CD's dimension scoring pattern shifted? e.g., hierarchy consistently rated higher than ambition]
+
+2. **New evaluation criteria:**
+   - [Any new dimensions emerging from technique tags?]
+
+3. **Calibration drift:**
+   - [Are "great" ratings becoming more/less common? Are the criteria changing?]
+
+### Current REVIEWER.md (first 2000 chars for reference):
+```
+{reviewer_current[:2000]}
+```
+
+---
+
+## How to Apply
+
+1. Read this proposal
+2. For each suggested change, decide: apply / skip / modify
+3. Edit the persona files directly
+4. Mark this proposal as APPLIED or REJECTED
+5. Commit changes
+
+"""
+    
+    proposal_path = proposals_dir / f"proposal-run-{run_count}.md"
+    proposal_path.write_text(proposal)
+    print(f"  📝 Persona amendment proposal saved: {proposal_path.name}")
+    print(f"     Review it and apply approved changes to BUILDER.md / REVIEWER.md")
 
 
 def human_gate_node(state: PipelineState) -> Command:
