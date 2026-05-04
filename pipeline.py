@@ -1236,30 +1236,6 @@ def asset_gen_node(state: PipelineState) -> dict:
         with open(manifest_path, "w") as f:
             json.dump(generated, f, indent=2)
     
-    # Upload all assets to here.now for builder URL access
-    asset_urls = {}
-    if total_generated > 0:
-        try:
-            publish_script = Path(os.path.expanduser("~/.agents/skills/here-now/scripts/publish.sh"))
-            publish_result = subprocess.run(
-                [str(publish_script), str(assets_dir)],
-                capture_output=True, text=True, timeout=60,
-            )
-            for line in publish_result.stdout.split("\n"):
-                line = line.strip()
-                if "here.now" in line and ("http://" in line or "https://" in line):
-                    # Extract URL from the line
-                    for word in line.split():
-                        if "here.now" in word and ("http://" in word or "https://" in word):
-                            base_url = word.rstrip("/")
-                            asset_urls["base"] = base_url
-                            print(f"  [asset-gen] Assets published to: {base_url}")
-                            break
-                    if "base" in asset_urls:
-                        break
-        except Exception as pub_e:
-            print(f"  [asset-gen] Publish failed: {pub_e} — builders will use local paths")
-    
     # Write a consolidated asset reference file per concept (builder reads this)
     for approach in state["approaches"]:
         did = approach["designer_id"]
@@ -1268,21 +1244,20 @@ def asset_gen_node(state: PipelineState) -> dict:
         if assets:
             ref_path = assets_dir / f"concept-{did}" / "ASSETS.md"
             asset_block = "# Generated Assets\n\n"
-            asset_block += "Use these REAL images. Do NOT create CSS gradient/placeholder replacements.\n\n"
+            asset_block += "These are REAL images saved locally. Read each file and embed as base64 data URIs in your HTML.\n"
+            asset_block += "This makes the HTML fully self-contained — no external image dependencies.\n\n"
             for a in assets:
-                url = a.get("url", "")
-                if asset_urls.get("base") and a.get("local_path"):
-                    rel = os.path.relpath(a["local_path"], str(assets_dir))
-                    url = f"{asset_urls['base']}/{rel}"
-                    a["hosted_url"] = url
+                local = a.get("local_path", "")
                 asset_block += f"## {a['name']} ({a['type']}, {a['width']}×{a['height']})\n"
-                asset_block += f"- URL: `{url}`\n"
-                asset_block += f"- Embed as: `<img src=\"{url}\" />` or `background-image: url('{url}');`\n"
-                asset_block += f"- Description: {a.get('prompt', '')[:150]}\n\n"
+                asset_block += f"- Local path: `{local}`\n"
+                asset_block += f"- Read this file, base64-encode it, and embed as:\n"
+                asset_block += f"  `<img src=\"data:image/jpeg;base64,{{BASE64_DATA}}\" />`\n"
+                asset_block += f"  or `background-image: url('data:image/jpeg;base64,{{BASE64_DATA}}');`\n"
+                asset_block += f"- Description: {a.get('prompt', '')[:150]}\n"
+                asset_block += f"- Size: {a.get('size_kb', '?')}KB\n\n"
             
             ref_path.write_text(asset_block)
             
-            # Also update the manifest with hosted URLs
             manifest_path = assets_dir / f"concept-{did}" / "manifest.json"
             with open(manifest_path, "w") as f:
                 json.dump(assets, f, indent=2)
@@ -1291,8 +1266,7 @@ def asset_gen_node(state: PipelineState) -> dict:
     
     tracer.end_span(span, output={"total_generated": total_generated, "by_concept": {str(k): len(v) for k, v in all_assets.items()}})
     
-    # Store asset metadata in state (not approaches — that's Annotated[list, add])
-    return {"asset_manifest": all_assets, "asset_base_url": asset_urls.get("base", "")}
+    return {"asset_manifest": all_assets, "asset_base_url": ""}
 
 
 def fan_out_builders(state: PipelineState) -> list:
@@ -1503,13 +1477,30 @@ The following moodboard images are at: {moodboard_dir}
     assets_dir = run_dir / "assets" / f"concept-{approach['designer_id']}"
     assets_md = assets_dir / "ASSETS.md"
     if assets_md.exists():
+        # Builder gets asset names + placeholder markers
+        # Post-processing replaces markers with base64 data URIs (avoids context bloat)
+        asset_ref_block = ""
+        manifest_path = assets_dir / "manifest.json"
+        if manifest_path.exists():
+            asset_list = json.loads(manifest_path.read_text())
+            for a in asset_list:
+                name = a["name"]
+                asset_ref_block += f"\n### {name} ({a.get('type','')}, {a.get('width','')}×{a.get('height','')})\n"
+                asset_ref_block += f"- Description: {a.get('prompt', '')[:150]}\n"
+                asset_ref_block += f"- Use in HTML: `<img src=\"asset://{name}\" />` or `background-image: url('asset://{name}');`\n"
+                asset_ref_block += f"- The `asset://` prefix will be automatically replaced with the real image data after build.\n"
+        
         assets_ref = f"""
 ## 🎨 GENERATED VISUAL ASSETS (CRITICAL — USE THESE)
 
-You have pre-generated visual assets. These are REAL designed images — use them as `<img>` tags or
-CSS `background-image` URLs. Do NOT replace them with CSS gradients, colored divs, or placeholder boxes.
+You have pre-generated visual assets. Reference them using the `asset://` prefix shown below.
+After you write the HTML, a post-processor will replace every `asset://name` with the actual
+base64-encoded image data, making the HTML fully self-contained.
 
-{assets_md.read_text()}
+Do NOT use CSS gradients, colored divs, or placeholder boxes where an asset exists.
+Do NOT try to base64-encode images yourself — just use `asset://name` references.
+
+{asset_ref_block if asset_ref_block else assets_md.read_text()}
 
 **IMPORTANT:** These assets are the design foundation. Your HTML is the frame — the assets carry the
 visual weight. A build that ignores these assets and uses CSS-only visuals will be rejected.
@@ -1595,6 +1586,32 @@ Save to: {run_dir}/builds/{concept_name}.html
     else:
         # Hermes (Claude) — agent with tool use
         result = run_hermes(f"{state['name']}-builder-{idx}", task, max_time=1800, max_turns=50)
+    
+    # Post-process: replace asset:// references with base64 data URIs
+    if build_path.exists() and assets_dir.exists():
+        import base64 as b64mod
+        html_content = build_path.read_text()
+        manifest_path = assets_dir / "manifest.json"
+        if manifest_path.exists() and "asset://" in html_content:
+            asset_list = json.loads(manifest_path.read_text())
+            replacements = 0
+            for a in asset_list:
+                name = a["name"]
+                lp = a.get("local_path")
+                if lp and Path(lp).exists():
+                    raw = Path(lp).read_bytes()
+                    ext = str(lp).rsplit(".", 1)[-1].lower()
+                    mime = {"jpg": "image/jpeg", "jpeg": "image/jpeg", "png": "image/png"}.get(ext, "image/jpeg")
+                    encoded = b64mod.b64encode(raw).decode("utf-8")
+                    data_uri = f"data:{mime};base64,{encoded}"
+                    # Replace all variants: asset://name, asset://name.jpg, etc.
+                    for pattern in [f"asset://{name}", f"asset://{name}.jpg", f"asset://{name}.jpeg", f"asset://{name}.png"]:
+                        if pattern in html_content:
+                            html_content = html_content.replace(pattern, data_uri)
+                            replacements += 1
+            if replacements > 0:
+                build_path.write_text(html_content)
+                print(f"  [asset-inject] Replaced {replacements} asset:// references with base64 data URIs ({len(html_content)//1024}KB)")
     
     # Spec compliance check (grep-based, no LLM cost)
     compliance = {"pass": True, "failures": [], "warnings": [], "checks": 0}
