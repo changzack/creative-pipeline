@@ -1481,6 +1481,55 @@ def qa_station_node(state: PipelineState) -> dict:
                 if overflow_items:
                     report["issues"].append(f"Overflow: {len(overflow_items)} items outside 1080×1920 viewport")
                 
+                # Mobile viewport check (390×844 simulates iPhone)
+                try:
+                    mobile_page = browser.new_page(viewport={"width": 390, "height": 844})
+                    mobile_page.goto(f"file://{build_path}", wait_until="networkidle")
+                    mobile_page.wait_for_timeout(2000)
+                    
+                    mobile_check = mobile_page.evaluate("""() => {
+                        const body = document.documentElement;
+                        const items = [];
+                        const selectors = ['[class*="item"]', '[class*="rank"]', '[class*="entry"]', 'li', '[class*="row"]'];
+                        let found = [];
+                        for (const sel of selectors) {
+                            const els = document.querySelectorAll(sel);
+                            if (els.length >= 5) { found = Array.from(els); break; }
+                        }
+                        let inView = 0;
+                        for (const el of found.slice(0, 15)) {
+                            const rect = el.getBoundingClientRect();
+                            if (rect.width > 0 && rect.height > 0) {
+                                const visible = rect.top < body.clientHeight && rect.bottom > 0 && rect.left < body.clientWidth && rect.right > 0;
+                                if (visible) inView++;
+                            }
+                        }
+                        return {
+                            scrollWidth: body.scrollWidth,
+                            scrollHeight: body.scrollHeight,
+                            clientWidth: body.clientWidth,
+                            clientHeight: body.clientHeight,
+                            itemsInView: inView,
+                            totalItems: found.length,
+                            needsScroll: body.scrollHeight > body.clientHeight * 1.5,
+                        };
+                    }""")
+                    
+                    mobile_ok = mobile_check.get("itemsInView", 0) >= 5 or not mobile_check.get("needsScroll", False)
+                    report["experience_checks"]["mobile_viewport"] = {
+                        "viewport": "390x844",
+                        "items_visible": mobile_check.get("itemsInView", 0),
+                        "needs_scroll": mobile_check.get("needsScroll", False),
+                        "scroll_height": mobile_check.get("scrollHeight", 0),
+                        "pass": mobile_ok,
+                    }
+                    if not mobile_ok:
+                        report["issues"].append(f"Mobile viewport: only {mobile_check.get('itemsInView', 0)} items visible (scroll height {mobile_check.get('scrollHeight', 0)}px on 844px viewport)")
+                    
+                    mobile_page.close()
+                except Exception as mob_e:
+                    print(f"    [qa] Mobile check error: {mob_e}")
+                
                 # Console errors
                 report["experience_checks"]["console_errors"] = {
                     "count": len(console_errors),
