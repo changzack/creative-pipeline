@@ -25,7 +25,7 @@
 ### Tier 0: Next-Gen (API Waitlist)
 
 #### Luma Uni-1 (Luma Labs) ⏳
-- **Endpoint**: API rolling out — waitlisted as zack@complex.com (submitted 2026-03-25)
+- **Endpoint**: API rolling out — waitlisted as your-email (submitted 2026-03-25)
 - **Architecture**: Autoregressive transformer (NOT diffusion). Text + images in ONE token sequence. Reasons about composition/constraints BEFORE rendering.
 - **Superpower**: #1 Elo in overall quality, style/editing, and reference-based generation. Beats Nano Banana 2 on spatial reasoning (0.58 vs 0.47) and logical reasoning (0.32 vs NB2's equivalent). Multi-ref with up to 8 input images.
 - **Pricing**: $0.09/image at 2K (text-to-image), $0.093 (edit/i2i), $0.11 (8-ref multi-ref). 10-30% cheaper than Nano Banana at 2K.
@@ -165,7 +165,7 @@ _(No entries yet — testing begins when fal.ai API key is configured)_
 
 ```bash
 # Set fal.ai API key (verified 2026-03-27)
-export FAL_KEY="b93c5940-0082-405b-9684-c1fed78c009f:957b94e1bb6636f8c7a19b01d96cacbd"
+export FAL_KEY="your-fal-api-key"
 
 # Test generation (Node.js)
 npm install @fal-ai/client

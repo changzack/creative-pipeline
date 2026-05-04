@@ -8,9 +8,9 @@ You are building for a creative director who will open this in a browser and jud
 
 ### The 3-Second Test
 When the build loads, the viewer should IMMEDIATELY perceive:
-- What the metaphor is (print? coin? broadcast? card?)
+- What the metaphor/concept is
 - That this is a designed artifact, not a template
-- That the #1 item is the hero
+- That there is clear visual hierarchy
 - That there is texture/depth/craft, not flat digital surfaces
 
 If any of these fail in 3 seconds, the build fails.
@@ -26,7 +26,7 @@ If the approach says "halftone SVG filter on hero image" — there MUST be a vis
 - [ ] If you can't implement a technique, document WHY and implement an alternative
 
 ### 2. Use generated assets — they ARE the design
-You will receive pre-generated visual assets (textures, product shots, graphics) as hosted URLs. These are REAL designed images, not placeholders. They are the visual foundation of the build.
+You will receive pre-generated visual assets (textures, product shots, graphics) as hosted URLs or `asset://` references. These are REAL designed images, not placeholders. They are the visual foundation of the build.
 
 **CRITICAL:** Use every generated asset. Embed them as `<img src="...">` or `background-image: url('...')`.
 - A build that ignores generated assets and uses CSS gradients instead = REJECTED
@@ -35,17 +35,14 @@ You will receive pre-generated visual assets (textures, product shots, graphics)
 
 If an asset URL fails to load, add `onerror` fallbacks with a styled placeholder (colored background + item name), not a broken image icon.
 
-### 3. Static state must be the default
-The card should load showing its COMPLETED state — all 10 items visible, full hierarchy displayed. This is because:
-- Users may screenshot without playing the animation
-- The static card IS the share artifact
-- Play/Reset controls allow replaying the animation from this state
+### 3. Follow the brief's output spec
+Build to the exact dimensions and format specified in the brief (e.g., 1080×1920 for Stories, 1200×630 for OG cards, etc.). Use a container matching those dimensions with `overflow: hidden`. Scale to viewport with CSS `zoom` for preview.
 
-### 4. Play and Reset controls are mandatory
-Every build must include:
-- A "Play Reveal" button that hides all content, then plays the full animation
-- A "Reset" button that kills any running animation and returns to the static completed state
-- Buttons styled to match the concept's visual language
+### 4. Static state should be the default
+Unless the brief specifies otherwise, the artifact should load showing its COMPLETED state — all content visible, full hierarchy displayed. If the brief calls for animation:
+- Add a "Play" button that triggers the reveal animation from the start
+- Add a "Reset" button that returns to the static completed state
+- Style controls to match the concept's visual language
 
 ### 5. Typography is not optional
 The approach doc specifies exact fonts, weights, and sizes. Load them. Use them. If a Google Font fails, have a named fallback that's close (not system sans-serif).
@@ -63,19 +60,7 @@ These techniques should be VISIBLE, not theoretical:
 - Embossed text: Multiple text-shadows creating depth — should look raised, not just colored
 - Registration marks: Should be precise, small, and in the right positions
 
-### 7. Card dimensions
-Build at exactly 1080×1920 (9:16 portrait). Use a container with:
-```css
-.card {
-  width: 1080px;
-  height: 1920px;
-  position: relative;
-  overflow: hidden;
-}
-```
-Scale to viewport with JS or CSS `transform: scale()` for preview.
-
-### 8. Zero tolerance for console errors
+### 7. Zero tolerance for console errors
 Check for:
 - Font loading failures
 - Image 404s
@@ -86,9 +71,9 @@ Check for:
 
 **The moodboard is for VISUAL STYLE INSPIRATION only. The brief defines WHAT you are building.**
 
-You must build exactly the product described in the brief using the sample data provided. Do NOT copy content, product types, or data formats from moodboard images. If the brief says "ranked list of sneakers" with specific sneaker names in the Sample Data section, you build a ranked list of those exact sneakers — even if the moodboard shows music playlists, sports stats, or recipes.
+You must build exactly the product described in the brief using the sample data provided. Do NOT copy content, product types, or data formats from moodboard images. If the brief says "ranked list" with specific items in the Sample Data section, build exactly that — even if the moodboard shows completely different products or content types.
 
-**This rule exists because:** In V3b, builders received a moodboard full of Spotify Wrapped screenshots and built Spotify Wrapped clones instead of the brief's sneaker ranking cards. The moodboard's visual content overwhelmed the brief's text instructions. Your job is to apply the moodboard's VISUAL TECHNIQUES to the brief's CONTENT.
+**Why this rule exists:** Builders have a tendency to replicate moodboard CONTENT instead of just borrowing visual style. The moodboard's visual content can overwhelm the brief's text instructions. Your job is to apply the moodboard's VISUAL TECHNIQUES to the brief's CONTENT.
 
 If you find yourself building something that doesn't match the brief's product/content, STOP and re-read the brief.
 
@@ -96,20 +81,20 @@ If you find yourself building something that doesn't match the brief's product/c
 
 These mistakes have been made before. Don't repeat them:
 
-1. **Animation auto-plays with no controls** — ALWAYS add Play/Reset
-2. **Default state is blank/hidden** — Default should show the completed card
+1. **Animation auto-plays with no controls** — Add Play/Reset if the brief calls for animation
+2. **Default state is blank/hidden** — Default should show the completed artifact
 3. **Approach doc describes texture but build is flat** — If it says grain, there must be grain
-4. **All three builds use the same fonts** — Check the task file for SPECIFIC font requirements
-5. **Items #8-10 fade to invisible** — Minimum opacity 0.5 for the lowest tier
-6. **Reset button shows final state instead of hiding** — Reset = return to static completed state
-7. **Hero image is generic** — Use the specific URLs provided
-8. **Border-radius everywhere** — Check if the approach doc specifies sharp corners
-9. **Everything centered** — Check if the approach doc specifies left-alignment
-10. **Animation is just fade-ins** — The approach doc describes a narrative arc, implement it
+4. **Multiple builds use the same fonts** — Check the task file for SPECIFIC font requirements per concept
+5. **Low-ranked items fade to invisible** — Minimum opacity 0.5 for the lowest tier in any hierarchy
+6. **Hero image is generic** — Use the specific content/URLs provided in the brief
+7. **Border-radius everywhere** — Check if the approach doc specifies sharp corners
+8. **Everything centered** — Check if the approach doc specifies left-alignment or asymmetry
+9. **Animation is just fade-ins** — The approach doc describes a narrative arc, implement it
+10. **Described but not built** — Approach says "SVG filter" but build has a flat div
 
-## Taste Calibration (from creative director rating 15 builds)
+## Taste Calibration
 
-**Results: 0 great, 6 acceptable, 9 bad.** Every build that looked like "AI slop" — clean, generic, soulless — was rated BAD. The acceptable ones had: creative ambition, novel visual techniques, 3D/depth, and felt HUMAN-made.
+**Results from creative director calibration: 0 great, 6 acceptable, 9 bad.** Every build that looked like "AI slop" — clean, generic, soulless — was rated BAD. The acceptable ones had: creative ambition, novel visual techniques, 3D/depth, and felt HUMAN-made.
 
 ### YOUR BUILD MUST NOT LOOK LIKE AN AI MADE IT.
 
@@ -134,13 +119,13 @@ Perfect = boring. Real designers don't pixel-snap everything:
 Before writing the final file, open it mentally and ask:
 1. Does the 3-second test pass?
 2. Is every approach doc technique visible (not just coded)?
-3. Are Play/Reset controls present and functional?
-4. Does the static default state show all 10 items?
-5. Are items #8-10 legible?
+3. Are interactive controls present if the brief requires animation?
+4. Does the static default state show all content?
+5. Is all content legible, including lower-priority items?
 6. Is there perceptible texture (grain, depth, material)?
 7. Does the typography create genuine hierarchy?
 8. Are the specified fonts loading?
-9. Are real product images loading?
+9. Are real assets/images loading?
 10. Zero console errors?
 
 If any answer is "no," fix it before saving.

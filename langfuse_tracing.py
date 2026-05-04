@@ -8,7 +8,7 @@ Usage in pipeline.py:
     from langfuse_tracing import tracer
     
     # At run start:
-    tracer.start_run("sharecard-v3", brief_text)
+    tracer.start_run("my-run", brief_text)
     
     # In each node:
     span = tracer.start_span("research", input={"brief": brief})
@@ -60,8 +60,8 @@ class PipelineTracer:
         
         try:
             self._client = Langfuse(
-                public_key=public_key or os.environ.get("LANGFUSE_PUBLIC_KEY", "pk-lf-pipeline-v3"),
-                secret_key=secret_key or os.environ.get("LANGFUSE_SECRET_KEY", "sk-lf-pipeline-v3-secret2026"),
+                public_key=public_key or os.environ.get("LANGFUSE_PUBLIC_KEY", "your-public-key"),
+                secret_key=secret_key or os.environ.get("LANGFUSE_SECRET_KEY", "your-secret-key"),
                 host=host or os.environ.get("LANGFUSE_HOST", "http://localhost:3000"),
             )
             self._enabled = True

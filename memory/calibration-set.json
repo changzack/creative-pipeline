@@ -1,139 +1,19 @@
 {
-  "_schema": "pipeline.calibration.v1",
-  "rated_by": "zack",
-  "rated_at": "2026-05-01T23:21:00-07:00",
-  "count": 15,
+  "_schema": "calibration-set-v1",
+  "_note": "Example calibration set \u2014 replace with your own rated builds",
+  "rated_by": "creative-director",
+  "rated_at": "2026-05-04",
+  "count": 0,
   "distribution": {
     "great": 0,
-    "acceptable": 6,
-    "bad": 9
+    "acceptable": 0,
+    "bad": 0
   },
-  "ratings": [
-    {
-      "id": 0,
-      "name": "Monument",
-      "source": "Sharecard V1",
-      "rating": "bad",
-      "path": "overnight-runs/sharecard-exploration/builds/monument.html"
-    },
-    {
-      "id": 1,
-      "name": "Countdown Tape",
-      "source": "Sharecard V1",
-      "rating": "acceptable",
-      "path": "overnight-runs/sharecard-exploration/builds/countdown-tape.html"
-    },
-    {
-      "id": 2,
-      "name": "Vault Card",
-      "source": "Sharecard V1",
-      "rating": "bad",
-      "path": "overnight-runs/sharecard-exploration/builds/vault-card.html"
-    },
-    {
-      "id": 3,
-      "name": "Pressure Print",
-      "source": "Sharecard V2",
-      "rating": "bad",
-      "path": "overnight-runs/sharecard-v2/builds/pressure-print.html"
-    },
-    {
-      "id": 4,
-      "name": "The Mint",
-      "source": "Sharecard V2",
-      "rating": "bad",
-      "path": "overnight-runs/sharecard-v2/builds/the-mint.html"
-    },
-    {
-      "id": 5,
-      "name": "Timing Tower",
-      "source": "Sharecard V2",
-      "rating": "bad",
-      "path": "overnight-runs/sharecard-v2/builds/timing-tower.html"
-    },
-    {
-      "id": 6,
-      "name": "Fight Card",
-      "source": "Smoke Test",
-      "rating": "acceptable",
-      "path": "overnight-runs/smoke-test-1/builds/concept-0.html"
-    },
-    {
-      "id": 7,
-      "name": "Press Run",
-      "source": "Smoke Test",
-      "rating": "bad",
-      "path": "overnight-runs/smoke-test-1/builds/concept-1.html"
-    },
-    {
-      "id": 8,
-      "name": "Weigh-In",
-      "source": "Smoke Test",
-      "rating": "bad",
-      "path": "overnight-runs/smoke-test-1/builds/concept-2.html"
-    },
-    {
-      "id": 9,
-      "name": "Chain Reaction",
-      "source": "Ranking Exp",
-      "rating": "acceptable",
-      "path": "overnight-runs/2026-03-27-ranking-experiences/round-1/output/chain-reaction.html"
-    },
-    {
-      "id": 10,
-      "name": "Swipe Duels",
-      "source": "Ranking Exp",
-      "rating": "bad",
-      "path": "overnight-runs/2026-03-27-ranking-experiences/round-1/output/swipe-duels.html"
-    },
-    {
-      "id": 11,
-      "name": "Spectrum",
-      "source": "Ranking Exp",
-      "rating": "bad",
-      "path": "overnight-runs/2026-03-27-ranking-experiences/round-1/output/spectrum.html"
-    },
-    {
-      "id": 12,
-      "name": "Pile Up",
-      "source": "Quiz V3",
-      "rating": "acceptable",
-      "path": "overnight-runs/2026-03-24-quiz-v3-c/round-3/output/pile-up.html"
-    },
-    {
-      "id": 13,
-      "name": "Bleed Through",
-      "source": "Quiz V3",
-      "rating": "acceptable",
-      "path": "overnight-runs/2026-03-24-quiz-v3-c/round-3/output/bleed-through.html"
-    },
-    {
-      "id": 14,
-      "name": "Seismic",
-      "source": "Quiz V3",
-      "rating": "acceptable",
-      "path": "overnight-runs/2026-03-24-quiz-v3-c/round-3/output/seismic.html"
-    }
-  ],
+  "ratings": [],
   "taste_notes": {
-    "from": "zack",
-    "date": "2026-05-01",
-    "signal": [
-      "Creative concept + novel execution >>> clean/polished output",
-      "3D, visual techniques used in novel ways = good signal",
-      "AI slop is the worst failure mode \u2014 clean but generic is BAD",
-      "Junior graphic designer energy > AI-generated energy",
-      "Raw/imperfect but creative > polished but soulless",
-      "Goal: creative starting point Zack can work with, not ship-ready",
-      "Flat design = bad. Interesting visual depth = good",
-      "Looks less like AI made it = higher rating"
-    ],
-    "hierarchy": [
-      "1. Creative ambition + novel techniques (most important)",
-      "2. Doesn't look like AI slop (table stakes)",
-      "3. Visual depth \u2014 3D, texture, layering",
-      "4. Something workable as a creative starting point",
-      "5. Polish/cleanliness (least important \u2014 can be fixed)"
-    ]
+    "hierarchy": "The most important axis \u2014 a 5/5 hierarchy with 3/5 ambition beats 4/5 ambition with 2/5 hierarchy",
+    "motion": "Motion design is a powerful differentiator when intentional",
+    "texture": "Decorative texture must NOT touch primary readable text",
+    "anti_slop": "If it looks like AI made it, it fails regardless of technical quality"
   }
 }

@@ -16,10 +16,10 @@ Your primary research tool is Refero (refero.design), accessed via MCP. Refero h
 ### Research Process
 1. **Parse the brief** — extract the product type, content type, and visual goals
 2. **Run 10-15 Refero searches** across different angles:
-   - The product category (e.g., "share card", "leaderboard", "ranking")
-   - Visual techniques mentioned in the brief (e.g., "3D", "data visualization")
-   - Adjacent categories that might inspire (e.g., "sports stats", "music recap")
-   - Specific UI patterns (e.g., "dark mode dashboard", "bento grid")
+   - The product category directly (what the brief describes)
+   - Visual techniques mentioned in the brief (e.g., "3D", "data visualization", "editorial")
+   - Adjacent categories that might inspire unexpected solutions
+   - Specific UI patterns relevant to the brief's format
 3. **Select 8-12 diverse references** — not all from the same category
 4. **Download moodboard images** — save to `{run_dir}/moodboard/`
 5. **Write VISUAL-RESEARCH.md** with structured analysis
@@ -61,23 +61,23 @@ Your primary research tool is Refero (refero.design), accessed via MCP. Refero h
 ## Quality Gates
 
 ### Moodboard Diversity Mandate
-Your moodboard MUST span at least 3 distinct visual language categories:
+Your moodboard MUST span at least 3 distinct visual language categories. Examples:
 - Data visualization / infographic
 - Editorial / magazine layout
 - Product / e-commerce
-- Social / share card
+- Social / share cards
 - Dashboard / dark UI
 - Experimental / art-directed
+- Motion / broadcast design
+- Print / physical artifact
 
 If all your references come from one category, your research has failed.
 
 ### Banned Reference Types
-Do NOT include references that match these aesthetics (accumulated from past run rejections):
-- Vintage boxing/fight card posters
-- Cream/newsprint/sepia backgrounds
-- Spotify Wrapped layouts
+Do NOT include references matching aesthetics the pipeline has learned to avoid. Check the brief for any project-specific anti-patterns. General bans:
 - Generic gradient hero sections
-- Glassmorphism / frosted glass cards
+- Stock photography landing pages
+- Overly common UI patterns with no creative angle
 
 ### Image Quality Requirements
 - Each moodboard image should show a REAL product screen, not an aggregator listing page

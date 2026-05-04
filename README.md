@@ -1,77 +1,58 @@
 # Creative Pipeline
 
-A multi-agent creative pipeline that generates, evaluates, and iterates on visual design prototypes using LLMs and image generation models.
+A multi-agent creative pipeline that generates, evaluates, and iterates on visual design artifacts using LLMs.
 
-Built for producing high-quality, non-generic creative output — specifically targeting the "AI slop" problem where LLM-generated designs converge on the same safe, polished, soulless aesthetics.
+Built with [LangGraph](https://github.com/langchain-ai/langgraph) for orchestration, multiple foundation models for diverse output, and a human-in-the-loop taste gate for quality control.
+
+## What It Does
+
+Given a creative brief, the pipeline:
+
+1. **Research** — Searches design references via [Refero.design](https://refero.design) MCP, builds a visual moodboard with extracted design tokens
+2. **Design** — 3 parallel designers (Claude Opus, GPT-5.4, Gemini 3.1 Pro) produce approach documents with build contracts
+3. **Approach Gate** — Mechanical + LLM convergence check prevents all 3 designers from producing the same thing
+4. **Asset Generation** — [fal.ai](https://fal.ai) generates textures, product shots, and graphics from designer manifests
+5. **Build** — Each model builds a self-contained HTML artifact with embedded assets
+6. **QA Station** — Playwright-based browser testing: content fidelity, viewport rendering, console errors, animation detection
+7. **Pairwise Judge** — Bidirectional comparison with position-bias control (GPT-4o vision)
+8. **Human Gate** — Creative director reviews via mobile evaluation app, submits structured feedback
+9. **Wiki Ingest** — Feedback routes to technique pages, model profiles, and taste patterns for cross-run learning
 
 ## Architecture
 
 ```
-research → designer ×3 → approach_gate → asset_gen → builder ×3 → qa → judge → human_gate
-               ↑                                                                    │
-               └────────────────────── iterate ←────────────────────────────────────┘
+Brief → Research → Designer ×3 → Approach Gate → Asset Gen → Builder ×3 → QA → Judge → Human Gate
+                                                                                          ↓
+                                                                              Wiki ← Structured Feedback
+                                                                                          ↓
+                                                                                    Iterate / Ship
 ```
 
-### Pipeline Phases
-
-| Phase | What | How |
-|---|---|---|
-| **Research** | Visual research via Refero MCP | Hermes agent with structured queries |
-| **Designer ×3** | 3 parallel approach docs with different visual language mandates | Claude Opus via Hermes (3D, data viz, kinetic type) |
-| **Approach Gate** | Convergence detection + ambition check | Mechanical font/color comparison + LLM conceptual check |
-| **Asset Generation** | Pre-generate textures, product shots, graphics | fal.ai (FLUX, Recraft V3, Nano Banana 2) |
-| **Builder ×3** | Build HTML prototypes from approach docs | Multi-model: Claude Opus + GPT-5.4 + Gemini 3.1 Pro |
-| **QA Station** | Playwright-based experience testing | Render check, content fidelity, animation, mobile viewport |
-| **Judge** | Bidirectional pairwise comparison | GPT-4o vision with moodboard context |
-| **Human Gate** | Creative director taste check | `interrupt()` → approve / iterate / reject |
-
-### Key Design Decisions
-
-- **Multi-model builders** — Claude, GPT, and Gemini build in parallel to avoid single-model aesthetic monoculture
-- **Bidirectional pairwise judging** — More reliable than 1-10 scoring for subjective creative work
-- **Asset generation** — fal.ai generates real textures/product shots/graphics so builds aren't 100% programmatic CSS
-- **Persistent personas** — Designer, Builder, Reviewer, Researcher personas accumulate feedback across runs
-- **Cross-run learning** — `techniques.json` tracks what worked/failed across all runs
-- **Anti-AI-slop calibration** — Taste weights derived from human ratings of 15+ builds
-
-## Tech Stack
-
-- **Orchestration:** [LangGraph](https://github.com/langchain-ai/langgraph) (StateGraph + SQLite checkpointer)
-- **Agent execution:** [Hermes Agent](https://github.com/hermes-agent/hermes) (Claude Opus workers)
-- **Direct API builders:** OpenAI (GPT-5.4), Google (Gemini 3.1 Pro)
-- **Image generation:** [fal.ai](https://fal.ai) (FLUX, Recraft V3, Nano Banana 2)
-- **QA:** [Playwright](https://playwright.dev) (headless browser testing)
-- **Observability:** [Langfuse](https://langfuse.com) (self-hosted, optional)
-- **Dashboard:** Static HTML generator (dark theme, per-run detail views)
+**Key design decisions:**
+- **Multi-model diversity** — Claude Opus, GPT-5.4, and Gemini 3.1 Pro as parallel builders prevent monoculture output
+- **Pairwise > scalar scoring** — More reliable for subjective creative evaluation ([research](https://arxiv.org/abs/2403.16950))
+- **File-based memory** — Pipeline Wiki (markdown) over databases. Knowledge compounds across runs without infrastructure
+- **`asset://` protocol** — Builders write lightweight refs, post-processor injects base64 data URIs. Self-contained HTML output
+- **Constitutional evaluation** — Personas accumulate learnings from human verdicts (inspired by [DSPy GEPA](https://arxiv.org/abs/2507.19457))
 
 ## Quick Start
 
 ### Prerequisites
+- Python 3.9+
+- API keys: Anthropic, OpenAI, Google AI
+- Optional: fal.ai (asset generation), Langfuse (observability)
 
+### Setup
 ```bash
-# Python 3.9+
-python3 -m venv .venv
-source .venv/bin/activate
-
-# Core dependencies
+python3 -m venv .venv && source .venv/bin/activate
 pip install langgraph anthropic openai google-genai playwright fal-client
-
-# Playwright browsers
 playwright install chromium
 
-# Hermes Agent (for Claude builders/designers)
-# See: https://github.com/hermes-agent/hermes
-```
-
-### Configuration
-
-```bash
 cp .env.example .env
-# Fill in your API keys
+# Edit .env with your API keys
 ```
 
 ### Run
-
 ```bash
 # Start a pipeline run
 python pipeline.py run --brief examples/CREATIVE-BRIEF.md --name my-first-run
@@ -79,72 +60,104 @@ python pipeline.py run --brief examples/CREATIVE-BRIEF.md --name my-first-run
 # Check status
 python pipeline.py status --thread my-first-run
 
-# Resume after human gate
-python pipeline.py resume --thread my-first-run --decision approve
+# Resume after human gate review
+python pipeline.py resume --thread my-first-run
 ```
 
-### Detached Run (survives terminal close)
-
+### Evaluate
 ```bash
-./run-pipeline.sh examples/CREATIVE-BRIEF.md my-run-name
-# Log: /tmp/pipeline-runs/my-run-name.log
+# Generate mobile evaluation app
+python generate-eval-app.py --run-dir overnight-runs/my-first-run
+
+# Generate dashboard
+python generate-dashboard.py --run-dir overnight-runs/my-first-run
 ```
 
 ## Project Structure
 
 ```
-├── pipeline.py              # Main orchestrator (LangGraph StateGraph)
-├── langfuse_tracing.py      # Observability wrapper (graceful degradation)
-├── generate-dashboard.py    # Static HTML dashboard generator
-├── run-pipeline.sh          # Detached runner script
-├── personas/                # Persistent agent personas
-│   ├── BUILDER.md           # Builder: code execution, anti-AI-slop mandate
-│   ├── DESIGNER.md          # Designer: approach docs, asset manifests
-│   ├── RESEARCHER.md        # Researcher: Refero MCP visual research
-│   └── REVIEWER.md          # Reviewer: calibrated taste preferences
-├── references/              # Knowledge layer (injected into agents)
-│   ├── recipes.md           # Proven CSS/JS implementations
-│   ├── advanced-techniques.md
-│   ├── image-gen-models.md  # fal.ai model routing guide
-│   └── ...
-├── memory/                  # Cross-run learning
-│   ├── techniques.json      # Technique registry (verdicts + learnings)
-│   └── calibration-set.json # Human-rated builds (ground truth)
-└── examples/
-    └── CREATIVE-BRIEF.md    # Example brief (Rerank Sharecard)
+pipeline.py              # Main orchestrator (~2200 lines, 9 LangGraph nodes)
+generate-eval-app.py     # Mobile-first evaluation app generator
+generate-dashboard.py    # Run dashboard generator
+langfuse_tracing.py      # Optional Langfuse observability wrapper
+run-pipeline.sh          # Detached runner (survives terminal closure)
+
+personas/                # Agent persona files (accumulate learnings)
+  BUILDER.md             # Build agent — anti-AI-slop mandate, asset integration
+  DESIGNER.md            # Design agent — approach docs with build contracts
+  RESEARCHER.md          # Research agent — Refero MCP, moodboard curation
+  REVIEWER.md            # Judge agent — calibrated taste weights
+
+references/              # Knowledge base (injected into agent prompts)
+  advanced-techniques.md # CSS/WebGL/SVG techniques catalog
+  recipes.md             # Proven implementation recipes
+  creative-patterns.md   # Design patterns that score well
+  image-gen-models.md    # fal.ai model routing guide
+  ...
+
+wiki/                    # Pipeline Wiki — compounds across runs
+  aesthetics/            # What scores well, anti-patterns
+  techniques/            # Technique evidence (3D transforms, SVG grain, etc.)
+  models/                # Per-model performance profiles
+  research/              # Research playbooks
+  builds/                # Build patterns (mobile viewport, content fidelity)
+
+memory/                  # Cross-run learning
+  calibration-set.json   # Human-rated builds (ground truth)
+  techniques.json        # Technique registry
+
+examples/                # Brief templates
+docs/                    # Architecture docs, plans, reports
 ```
 
-## Calibration
+## The Pipeline Wiki
 
-The pipeline's taste is calibrated from human ratings:
+Inspired by [Karpathy's LLM Wiki pattern](https://gist.github.com/karpathy/442a6bf555914893e9891c11519de94f) — knowledge compounds with every run:
 
-| Weight | Criterion |
-|---|---|
-| 40% | Creative ambition (novel techniques, visual metaphors) |
-| 20% | Anti-AI-slop (does it look like a human designed it?) |
-| 15% | Visual depth (texture, layering, 3D) |
-| 10% | Typography (intentional, not default) |
-| 10% | Visual hierarchy (clear ranking, hero treatment) |
-| 5% | Technical execution (clean code, no errors) |
+- **Human verdicts** (structured feedback from eval app) auto-route to wiki pages
+- **Technique evidence** accumulates: "3D CSS transforms → proven, highlighted by CD in run X"
+- **Model profiles** track strengths/weaknesses with evidence from actual runs
+- **Anti-patterns** grow from real failures, not assumptions
+
+The wiki is the pipeline's long-term memory. Raw sources (run artifacts) are immutable; wiki pages are LLM-maintained summaries that get smarter over time.
+
+## Evaluation System
+
+The human gate uses a mobile-first evaluation app (generated per-run) that captures:
+
+- **Per-concept quick rating** — 🔥 Great / ✅ OK / ❌ Bad
+- **5-dimension scores** — Creative Ambition (40%), AI Slop Check (20%), Visual Depth (15%), Typography (10%), Hierarchy (10%)
+- **Technique tags** — Landed / Standout / Partial / Missed
+- **Freeform notes** per concept
+
+Research basis: [DSPy GEPA](https://arxiv.org/abs/2507.19457) (textual feedback > scores), [Agentic Design Review System](https://arxiv.org/abs/2508.10745) (multi-dimension decomposition), RLHF literature (pairwise > scalar).
+
+## Design System Enforcement
+
+Optional `--design-system` flag enforces token compliance:
+- Greps built HTML for off-system fonts
+- Checks color values against palette (20-unit RGB tolerance)
+- Injects design tokens into designer + builder prompts
+- QA station flags violations
 
 ## Cost
 
-Typical run: **$0.80–$1.70** (3 concepts)
+Typical run: **$0.30 - $0.90** depending on iteration rounds.
+- Budget cap: `MAX_COST_USD = 20.0` with 80% alert
+- Asset generation: $0.003 - $0.08 per image (fal.ai)
+- Per-call token tracking with cost report JSON per run
 
-| Phase | Typical Cost |
-|---|---|
-| Research | $0.02 |
-| Design (×3) | $0.05 |
-| Approach Gate | $0.60 |
-| Asset Gen (×3) | $0.90 |
-| Build (×3) | $0.20 |
-| Judge | $0.08 |
-| **Total** | **~$1.70** |
+## Key Learnings (from 15+ pipeline runs)
+
+1. **Hierarchy > Ambition** — Strong information hierarchy is table stakes; creative ambition only counts when hierarchy is solid
+2. **Multi-model prevents monoculture** — Same model ×3 produces same output ×3, regardless of different prompts
+3. **Pairwise comparison beats 1-10 scoring** — Models can't reliably assign absolute scores to creative work
+4. **Texture must not touch readable text** — Decorative effects on backgrounds only
+5. **Brief drift is the #1 failure mode** — Content fidelity checks in QA catch builders who build the wrong thing
+6. **Motion design is a powerful differentiator** — Intentional animation elevates builds more than static visual techniques
+7. **Research must be structured** — Browser-scraping design sites fails; API-based tools (Refero MCP) work
+8. **100% programmatic output = AI slop** — Mixing generated imagery with code produces design-grade output
 
 ## License
 
 MIT
-
-## Author
-
-Built by [Zack Chang](https://github.com/changzack) with [Mira](https://openclaw.ai) (OpenClaw agent).

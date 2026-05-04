@@ -133,6 +133,9 @@ class PipelineState(TypedDict):
     asset_manifest: Optional[dict]  # designer_id -> list of generated assets
     asset_base_url: Optional[str]   # here.now base URL for hosted assets
     
+    # Design system constraint
+    design_system: Optional[str]    # loaded design system tokens (markdown)
+    
     # Cost tracking
     cost_usd: float
     phase_costs: dict  # {phase_name: cost}
@@ -218,6 +221,195 @@ def record_verdict(run_name: str, decision: str, feedback: str,
     
     save_technique_registry(registry)
     print(f"  📝 Recorded verdict: {decision} ({len(registry['techniques'])} techniques, {len(registry['verdicts'])} verdicts)")
+
+
+# ── Wiki Ingest (Compounding Knowledge Base) ────────────────────
+
+WIKI_DIR = WORKSPACE / "pipeline/wiki"
+
+def wiki_ingest(state: dict, decision: str, feedback: str):
+    """Ingest run results into the pipeline wiki after human verdict.
+    
+    Updates: run summary, technique evidence, aesthetic patterns, model performance, log.
+    Non-fatal: pipeline continues even if wiki write fails.
+    """
+    import re
+    WIKI_DIR.mkdir(parents=True, exist_ok=True)
+    
+    run_name = state["name"]
+    ranking = state.get("ranking", [])
+    approaches = state.get("approaches", [])
+    builds = state.get("builds", [])
+    cost = state.get("cost_usd", 0)
+    iteration = state.get("iteration", 0)
+    design_system = "SMPLX" if state.get("design_system") else "none"
+    
+    # 1. Write run summary page
+    runs_dir = WIKI_DIR / "runs"
+    runs_dir.mkdir(parents=True, exist_ok=True)
+    
+    summary_lines = [f"# Run: {run_name}", ""]
+    summary_lines.append(f"- **Date:** {time.strftime('%Y-%m-%d %H:%M')}")
+    summary_lines.append(f"- **Verdict:** {decision}")
+    summary_lines.append(f"- **Iteration:** {iteration}")
+    summary_lines.append(f"- **Cost:** ${cost:.2f}")
+    summary_lines.append(f"- **Design System:** {design_system}")
+    summary_lines.append("")
+    
+    if feedback:
+        summary_lines.append(f"## Human Feedback")
+        summary_lines.append(f"> {feedback}")
+        summary_lines.append("")
+    
+    summary_lines.append("## Concepts")
+    for r in ranking:
+        model = r.get("model", "unknown")
+        wins = r.get("wins", 0)
+        size = r.get("size", 0)
+        rank = r.get("rank", "?")
+        idx = r.get("index", r.get("build_index", "?"))
+        compliance = r.get("compliance", {})
+        warnings = compliance.get("warnings", [])
+        
+        summary_lines.append(f"### #{rank} — Concept {idx} ({model})")
+        summary_lines.append(f"- Wins: {wins}, Size: {size//1024}KB")
+        if warnings:
+            summary_lines.append(f"- Warnings: {', '.join(w[:60] for w in warnings[:3])}")
+        summary_lines.append("")
+    
+    # Pairwise results
+    pairwise = state.get("pairwise_results", [])
+    if pairwise:
+        summary_lines.append("## Pairwise Results")
+        for pr in pairwise:
+            agreed = "agreed" if pr.get("agreed") else "disagreed"
+            winner = f"concept {pr['winner']}" if pr.get("winner") is not None else "tie"
+            summary_lines.append(f"- {pr['pair'][0]} vs {pr['pair'][1]}: {agreed} → {winner}")
+        summary_lines.append("")
+    
+    run_summary_path = runs_dir / f"{run_name}.md"
+    run_summary_path.write_text("\n".join(summary_lines))
+    
+    # 2. Update log
+    log_path = WIKI_DIR / "log.md"
+    log_entry = f"\n## [{time.strftime('%Y-%m-%d')}] ingest | {run_name}\n"
+    log_entry += f"Verdict: {decision}. Cost: ${cost:.2f}. "
+    if ranking:
+        winner = ranking[0]
+        log_entry += f"Winner: Concept {winner.get('build_index', '?')} ({winner.get('model', '?')}, {winner.get('wins', 0)} wins). "
+    if feedback:
+        log_entry += f'Feedback: "{feedback[:100]}"'
+    log_entry += "\n"
+    
+    if log_path.exists():
+        with open(log_path, "a") as f:
+            f.write(log_entry)
+    
+    # 3. Update model pages with performance data
+    for r in ranking:
+        model = r.get("model", "unknown")
+        model_name = {
+            "claude-opus": "claude-opus",
+            "gpt-5": "gpt-5.4",
+            "gpt-5.4": "gpt-5.4",
+            "gemini": "gemini-3.1-pro",
+            "gemini-3.1-pro-preview": "gemini-3.1-pro",
+        }.get(model, model)
+        
+        model_page = WIKI_DIR / f"models/{model_name}.md"
+        if model_page.exists():
+            content = model_page.read_text()
+            # Append to performance history table
+            rank = r.get("rank", "?")
+            wins = r.get("wins", 0)
+            idx = r.get("index", r.get("build_index", "?"))
+            new_row = f"| {run_name} | Builder {idx} | #{rank} ({wins} wins) | {decision} | auto-ingested |"
+            
+            if "## Performance History" in content:
+                content = content.rstrip() + f"\n{new_row}\n"
+                model_page.write_text(content)
+    
+    # 4. Update anti-patterns if rejected
+    if decision == "reject" and feedback:
+        ap_path = WIKI_DIR / "aesthetics/anti-patterns.md"
+        if ap_path.exists():
+            content = ap_path.read_text()
+            new_entry = f"\n### {run_name} (auto-ingested)\n"
+            new_entry += f"- **Evidence:** Run {run_name}, verdict: reject\n"
+            new_entry += f"- **CD feedback:** > \"{feedback[:200]}\"\n"
+            new_entry += f"- **Date:** {time.strftime('%Y-%m-%d')}\n"
+            content = content.rstrip() + "\n" + new_entry
+            ap_path.write_text(content)
+    
+    # 5. Update what-scores-well if approved
+    if decision == "approve" and ranking:
+        ws_path = WIKI_DIR / "aesthetics/what-scores-well.md"
+        if ws_path.exists():
+            content = ws_path.read_text()
+            winner = ranking[0]
+            new_entry = f"\n### {run_name} — Concept {winner.get('build_index', '?')} ({winner.get('model', '?')})\n"
+            new_entry += f"- **Verdict:** approved\n"
+            new_entry += f"- **Wins:** {winner.get('wins', 0)} pairwise wins\n"
+            if feedback:
+                new_entry += f"- **CD feedback:** > \"{feedback[:200]}\"\n"
+            new_entry += f"- **Date:** {time.strftime('%Y-%m-%d')}\n"
+            content = content.rstrip() + "\n" + new_entry
+            ws_path.write_text(content)
+    
+    # 6. Update index with new run page
+    index_path = WIKI_DIR / "index.md"
+    if index_path.exists():
+        content = index_path.read_text()
+        if run_name not in content:
+            # Add under Run Summaries section
+            if "## Run Summaries" in content:
+                content = content.replace(
+                    "## Run Summaries",
+                    f"## Run Summaries\n- [{run_name}](runs/{run_name}.md) — {decision}"
+                )
+            index_path.write_text(content)
+    
+    print(f"  📚 Wiki ingested: runs/{run_name}.md + log + model pages" + 
+          (" + anti-patterns" if decision == "reject" else "") +
+          (" + what-scores-well" if decision == "approve" else ""))
+
+
+def get_wiki_context(brief: str, max_chars: int = 8000) -> str:
+    """Load relevant wiki pages as context for pipeline agents.
+    
+    Reads compiled knowledge from the wiki instead of raw techniques.json.
+    Returns a formatted string to inject into agent prompts.
+    """
+    context_parts = []
+    
+    # Always include: what scores well + anti-patterns (taste model)
+    for page in ["aesthetics/what-scores-well.md", "aesthetics/anti-patterns.md"]:
+        page_path = WIKI_DIR / page
+        if page_path.exists():
+            content = page_path.read_text()
+            context_parts.append(content)
+    
+    # Include overview
+    overview_path = WIKI_DIR / "overview.md"
+    if overview_path.exists():
+        context_parts.append(overview_path.read_text())
+    
+    # Include relevant technique pages
+    tech_dir = WIKI_DIR / "techniques"
+    if tech_dir.exists():
+        for tech_page in sorted(tech_dir.glob("*.md")):
+            content = tech_page.read_text()
+            # Only include proven/promising techniques
+            if "Status: proven" in content or "Status: promising" in content:
+                context_parts.append(content)
+    
+    combined = "\n\n---\n\n".join(context_parts)
+    
+    # Respect max_chars budget
+    if len(combined) > max_chars:
+        combined = combined[:max_chars] + "\n\n[... wiki context truncated ...]"
+    
+    return combined
 
 
 def get_relevant_learnings(brief: str, max_items: int = 10) -> str:
@@ -500,6 +692,86 @@ def check_spec_compliance(html_path: Path, contract: str) -> dict:
     return results
 
 
+def check_design_system_compliance(html_path: Path, design_system: str) -> dict:
+    """Check built HTML against a design system's token constraints.
+    
+    Parses the design system markdown to extract:
+    - Allowed fonts (font-family values)
+    - Allowed color palette (hex values)
+    Then scans the HTML for violations.
+    """
+    import re
+    if not html_path.exists():
+        return {"pass": True, "violations": [], "checks": 0}
+    
+    html = html_path.read_text()
+    violations = []
+    checks = 0
+    
+    # Extract allowed fonts from design system
+    allowed_fonts = set()
+    for line in design_system.split("\n"):
+        if "family/primary" in line.lower() or "font family" in line.lower():
+            # Extract font name from backticks or after pipe
+            fonts = re.findall(r'`([^`]+)`', line)
+            for f in fonts:
+                if f.lower() not in ("value", "token", "family/primary"):
+                    allowed_fonts.add(f.lower())
+    
+    # Extract allowed colors from design system
+    allowed_colors = set()
+    for match in re.findall(r'#[0-9a-fA-F]{6}', design_system):
+        allowed_colors.add(match.lower())
+    # Always allow pure black/white and near variants
+    allowed_colors.update({"#000000", "#ffffff"})
+    
+    # Check fonts used in HTML
+    if allowed_fonts:
+        fonts_in_html = set()
+        for match in re.findall(r'font-family:\s*["\']?([^"\';\},]+)', html, re.IGNORECASE):
+            for part in match.split(","):
+                fname = part.strip().strip("'\"").lower()
+                if fname and fname not in ("sans-serif", "serif", "monospace", "inherit", "system-ui"):
+                    fonts_in_html.add(fname)
+        
+        checks += len(fonts_in_html)
+        for font in fonts_in_html:
+            if not any(af in font or font in af for af in allowed_fonts):
+                violations.append(f"OFF-SYSTEM FONT: '{font}' (allowed: {', '.join(allowed_fonts)})")
+    
+    # Check colors used in HTML
+    colors_in_html = set(c.lower() for c in re.findall(r'#[0-9a-fA-F]{6}', html))
+    checks += len(colors_in_html)
+    
+    off_palette = []
+    for color in colors_in_html:
+        if color not in allowed_colors:
+            # Check if it's "close enough" (within 20 per channel)
+            try:
+                r1, g1, b1 = int(color[1:3], 16), int(color[3:5], 16), int(color[5:7], 16)
+                close = False
+                for ac in allowed_colors:
+                    r2, g2, b2 = int(ac[1:3], 16), int(ac[3:5], 16), int(ac[5:7], 16)
+                    if abs(r1-r2) <= 20 and abs(g1-g2) <= 20 and abs(b1-b2) <= 20:
+                        close = True
+                        break
+                if not close:
+                    off_palette.append(color)
+            except ValueError:
+                off_palette.append(color)
+    
+    if off_palette:
+        violations.append(f"OFF-PALETTE COLORS ({len(off_palette)}): {', '.join(sorted(off_palette)[:8])}{'...' if len(off_palette) > 8 else ''}")
+    
+    return {
+        "pass": len(violations) == 0,
+        "violations": violations,
+        "checks": checks,
+        "fonts_found": list(fonts_in_html) if allowed_fonts else [],
+        "off_palette_count": len(off_palette),
+    }
+
+
 # ── Utility Functions ───────────────────────────────────────────
 
 def run_hermes(job_id: str, task_content: str, max_time: int = 1200, max_turns: int = 40) -> dict:
@@ -578,7 +850,8 @@ def research_node(state: PipelineState) -> dict:
     persona = persona_path.read_text() if persona_path.exists() else ""
     rubric = load_reference("art-direction-rubric.md")
     patterns = load_reference("creative-patterns.md")
-    past_learnings = get_relevant_learnings(state["brief"])
+    wiki_context = get_wiki_context(state["brief"])
+    past_learnings = get_relevant_learnings(state["brief"])  # legacy, will phase out
     
     # Build diverse search queries from the brief
     task = f"""{persona}
@@ -662,7 +935,9 @@ Your final selection must include references from AT LEAST 3 of these visual app
 ## Known Creative Patterns
 {patterns if patterns else "(No pattern library available)"}
 
-{('## Past Run Learnings (avoid repeating mistakes)' + chr(10) + past_learnings) if past_learnings else ''}
+{('## Pipeline Wiki — Compiled Knowledge (what works, what fails, taste model)' + chr(10) + wiki_context) if wiki_context else ''}
+
+{('## Past Run Learnings (legacy)' + chr(10) + past_learnings) if past_learnings else ''}
 """
     
     result = run_hermes(f"{state['name']}-research", task, max_time=900)
@@ -726,7 +1001,7 @@ def designer_node(state: dict) -> dict:
     tactics = load_reference("enhancement-tactics.md")
     techniques_index = load_reference("advanced-techniques.md")
     contract_template = load_reference("design-contract-template.md")
-    past_learnings = get_relevant_learnings(state["brief"])
+    wiki_context = get_wiki_context(state["brief"])
     
     task = f"""{persona}
 
@@ -736,7 +1011,7 @@ def designer_node(state: dict) -> dict:
 ## Advanced Techniques Reference (technique index — reference by name in your contract)
 {techniques_index if techniques_index else ""}
 
-{('## Past Run Learnings (what worked and what failed in previous runs)' + chr(10) + past_learnings) if past_learnings else ''}
+{('## Pipeline Wiki — Compiled Knowledge (what works, what fails, taste model)' + chr(10) + wiki_context) if wiki_context else ''}
 
 ## CRITICAL TASTE CALIBRATION (from creative director, 2026-05-01)
 The creative director rated 15 past builds: **0 great, 6 acceptable, 9 bad.**
@@ -764,7 +1039,7 @@ The Build Contract is the most important part. It will be extracted and given to
 ## Visual Research (study before writing)
 {state.get('research', {}).get('content', 'No research available')}
 
-## Your Constraints
+{"## DESIGN SYSTEM CONSTRAINT" + chr(10) + "You MUST use ONLY the fonts, colors, and spacing from this design system. Creative expression happens WITHIN the system, not by breaking it. Non-compliant builds will be rejected by automated checking." + chr(10) + state.get('design_system', '') + chr(10) if state.get('design_system') else ""}## Your Constraints
 - Era/Reference Direction: {config['era']}
 - Anti-Patterns (DO NOT USE): {config['anti_patterns']}
 - Do NOT do browser web research. The Visual Research above is your complete reference set.
@@ -1179,7 +1454,10 @@ def asset_gen_node(state: PipelineState) -> dict:
     print(f"[ASSET GEN] Processing {len(state['approaches'])} approaches")
     span = tracer.start_span("asset_gen", input={"approach_count": len(state["approaches"])})
     
-    fal_key = os.environ.get("FAL_KEY", "b93c5940-0082-405b-9684-c1fed78c009f:957b94e1bb6636f8c7a19b01d96cacbd")
+    fal_key = os.environ.get("FAL_KEY", "")
+    if not fal_key:
+        print("  [asset-gen] ⚠️  FAL_KEY not set — skipping asset generation")
+        return {"asset_manifest": {}, "asset_base_url": ""}
     run_dir = RUNS_DIR / state["name"]
     assets_dir = run_dir / "assets"
     assets_dir.mkdir(parents=True, exist_ok=True)
@@ -1545,7 +1823,7 @@ If verification fails, your build is rejected and you must redo it.
 
 ---
 
-## Build Rules
+{"## ⛔ DESIGN SYSTEM ENFORCEMENT (automated checking — violations = rejection)" + chr(10) + "Your build will be scanned for design system compliance. ONLY the following fonts and colors are allowed:" + chr(10) + state.get('design_system', '') + chr(10) + "Any font-family not in this system = REJECTION. Any hex color not in this palette (or within tolerance) = REJECTION." + chr(10) if state.get('design_system') else ""}## Build Rules
 1. IMPLEMENT every technique in the Build Contract — visible on screen, not just in code
 2. Use ONLY the fonts listed in REQUIRED FONTS. Using any font from FORBIDDEN FONTS = automatic rejection.
 3. Use ONLY the colors listed in REQUIRED COLORS as your primary palette. Using colors from "Must NOT contain" = automatic rejection.
@@ -1924,6 +2202,15 @@ def qa_station_node(state: PipelineState) -> dict:
                 report["issues"].append(f"Browser QA failed: {type(e).__name__}: {str(e)[:100]}")
                 report["experience_checks"]["error"] = str(e)
                 print(f"  ⚠️  {concept_name}: browser QA error — {e}")
+        
+        # ── DESIGN SYSTEM COMPLIANCE CHECK ──
+        if state.get("design_system"):
+            ds_result = check_design_system_compliance(build_path, state["design_system"])
+            report["source_checks"]["design_system"] = ds_result
+            if not ds_result["pass"]:
+                for v in ds_result["violations"]:
+                    report["issues"].append(f"Design system violation: {v}")
+                print(f"     ⚠️  Design system: {len(ds_result['violations'])} violations")
         
         # ── VERDICT ──
         critical_failures = [i for i in report["issues"] if "BROKEN" in i or "blank" in i.lower() or "missing/empty" in i.lower()]
@@ -2341,7 +2628,7 @@ def human_gate_node(state: PipelineState) -> Command:
     tracer.score("human_decision", decision_scores.get(human_decision, 0.0),
                  comment=f"{human_decision}: {human_feedback[:200]}")
     
-    # Record verdict to technique registry (cross-run learning)
+    # Record verdict to technique registry (cross-run learning — legacy)
     record_verdict(
         run_name=state["name"],
         decision=human_decision,
@@ -2350,6 +2637,12 @@ def human_gate_node(state: PipelineState) -> Command:
         builds=state.get("builds", []),
         approaches=state.get("approaches", []),
     )
+    
+    # Ingest run results into the wiki (compounding knowledge base)
+    try:
+        wiki_ingest(state, human_decision, human_feedback)
+    except Exception as e:
+        print(f"  ⚠️  Wiki ingest failed (non-fatal): {e}")
     
     if human_decision == "approve":
         return Command(goto="deploy", update={
@@ -2448,6 +2741,7 @@ def main():
     run_parser = sub.add_parser("run", help="Start a new pipeline run")
     run_parser.add_argument("--brief", required=True, help="Path to brief markdown file")
     run_parser.add_argument("--name", required=True, help="Run name (used as thread_id)")
+    run_parser.add_argument("--design-system", default=None, help="Path to design system tokens file (e.g., smplx-design-system.md)")
     
     # Resume
     resume_parser = sub.add_parser("resume", help="Resume a paused pipeline")
@@ -2477,6 +2771,19 @@ def main():
         
         brief = brief_path.read_text()
         
+        # Load design system if specified
+        design_system = None
+        if getattr(args, 'design_system', None):
+            ds_path = Path(args.design_system)
+            if not ds_path.exists():
+                # Try references dir
+                ds_path = WORKSPACE / "skills/creative-technologist/references" / args.design_system
+            if ds_path.exists():
+                design_system = ds_path.read_text()
+                print(f"📐 Design system loaded: {ds_path.name} ({len(design_system)//1024}KB)")
+            else:
+                print(f"⚠️  Design system not found: {args.design_system}")
+        
         initial_state = {
             "name": args.name,
             "brief": brief,
@@ -2495,6 +2802,7 @@ def main():
             "phase_costs": {},
             "started_at": time.strftime("%Y-%m-%d %H:%M:%S"),
             "completed_at": None,
+            "design_system": design_system,
         }
         
         config["configurable"]["thread_id"] = args.name
