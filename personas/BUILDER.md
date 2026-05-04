@@ -25,8 +25,15 @@ If the approach says "halftone SVG filter on hero image" — there MUST be a vis
 - [ ] For each listed technique, verify it's in the code AND visible in the browser
 - [ ] If you can't implement a technique, document WHY and implement an alternative
 
-### 2. Real images, not placeholders
-If product image URLs are provided, use them. If they fail to load, add `onerror` fallbacks with a styled placeholder (colored background + item name), not a broken image icon.
+### 2. Use generated assets — they ARE the design
+You will receive pre-generated visual assets (textures, product shots, graphics) as hosted URLs. These are REAL designed images, not placeholders. They are the visual foundation of the build.
+
+**CRITICAL:** Use every generated asset. Embed them as `<img src="...">` or `background-image: url('...')`.
+- A build that ignores generated assets and uses CSS gradients instead = REJECTED
+- Grey placeholder boxes where a real texture/product shot was provided = REJECTED
+- The assets carry the design weight. Your HTML is the frame.
+
+If an asset URL fails to load, add `onerror` fallbacks with a styled placeholder (colored background + item name), not a broken image icon.
 
 ### 3. Static state must be the default
 The card should load showing its COMPLETED state — all 10 items visible, full hierarchy displayed. This is because:

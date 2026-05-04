@@ -63,10 +63,13 @@ COST_PER_1M = {
 # Run-level cost accumulator
 _run_costs = {"total_usd": 0.0, "by_phase": {}, "calls": []}
 
-def track_cost(model: str, input_tokens: int, output_tokens: int, phase: str = "unknown"):
-    """Track cost of an API call."""
-    rates = COST_PER_1M.get(model, {"input": 5.0, "output": 15.0})
-    cost = (input_tokens / 1_000_000 * rates["input"]) + (output_tokens / 1_000_000 * rates["output"])
+def track_cost(model: str, input_tokens: int, output_tokens: int, phase: str = "unknown", override_cost: Optional[float] = None):
+    """Track cost of an API call. Use override_cost for flat-rate services (e.g., fal.ai)."""
+    if override_cost is not None:
+        cost = override_cost
+    else:
+        rates = COST_PER_1M.get(model, {"input": 5.0, "output": 15.0})
+        cost = (input_tokens / 1_000_000 * rates["input"]) + (output_tokens / 1_000_000 * rates["output"])
     _run_costs["total_usd"] += cost
     _run_costs["by_phase"][phase] = _run_costs["by_phase"].get(phase, 0.0) + cost
     _run_costs["calls"].append({
@@ -125,6 +128,10 @@ class PipelineState(TypedDict):
     # Loop control
     iteration: int
     phase: str
+    
+    # Assets
+    asset_manifest: Optional[dict]  # designer_id -> list of generated assets
+    asset_base_url: Optional[str]   # here.now base URL for hosted assets
     
     # Cost tracking
     cost_usd: float
@@ -765,7 +772,61 @@ The Build Contract is the most important part. It will be extracted and given to
 
 ## REQUIRED OUTPUT FORMAT
 
-Your approach doc MUST end with a section called `## BUILD CONTRACT` that contains ONLY concrete, grep-able specs. No prose, no "feel like", no "inspired by". Just values.
+Your approach doc MUST include TWO key sections:
+1. `## ASSET MANIFEST` — visual assets to be generated (images, textures, graphics)
+2. `## BUILD CONTRACT` — concrete, grep-able specs for the builder
+
+### Asset Manifest
+
+The ASSET MANIFEST lists visual assets that will be GENERATED as real images before the build phase.
+Think like an art director commissioning photography/design work. These become real images the builder embeds.
+
+```
+## ASSET MANIFEST
+
+### Background Texture
+- type: texture
+- description: "Dark concrete surface with subtle grain, almost black (#0a0a0a) with micro-noise and hairline cracks"
+- dimensions: 1080x1920
+- model_hint: flux-schnell
+
+### Hero Product Shot
+- type: product
+- description: "Air Jordan 1 Chicago, side profile view, floating on transparent dark background, dramatic studio lighting from above left, slight drop shadow"
+- dimensions: 540x540
+- model_hint: flux-2-pro
+
+### Rank Badge
+- type: graphic
+- description: "Gold metallic #1 badge, circular embossed design, premium luxury feel, dark background"
+- dimensions: 200x200
+- model_hint: recraft-v3
+
+### Distress Overlay
+- type: decoration
+- description: "Subtle diagonal scratch marks and dust particles, white marks on dark background, grunge texture"
+- dimensions: 1080x1920
+- model_hint: flux-schnell
+```
+
+Asset types: texture, product, graphic, decoration, atmosphere, illustration
+Model hints: flux-schnell (fast/cheap textures), flux-2-pro (photorealistic), recraft-v3 (text/graphics), nano-banana-2 (creative illustrations)
+
+**What to request as assets (DO):**
+- Background textures (concrete, paper, fabric, noise, abstract)
+- Product photography (styled hero shots of ranked items)
+- Graphic elements (badges, stamps, dividers, rank indicators)
+- Atmospheric effects (smoke, light leaks, bokeh, grain overlays)
+
+**What NOT to request (the builder handles these in code):**
+- UI controls (buttons, inputs)
+- Animations (GSAP/CSS)
+- Layout structure (HTML/CSS)
+- Text content (rendered by the browser)
+
+### Build Contract
+
+Your approach doc MUST also end with a section called `## BUILD CONTRACT` that contains ONLY concrete, grep-able specs. No prose, no "feel like", no "inspired by". Just values.
 
 Example format (adapt to your concept):
 
@@ -974,6 +1035,266 @@ IMPORTANT: If 2+ concepts share the same metaphor/aesthetic, all_pass MUST be fa
     return out
 
 
+# ── Asset Generation ────────────────────────────────────────────
+
+# fal.ai model routing
+ASSET_MODEL_MAP = {
+    "texture": "fal-ai/flux/schnell",
+    "product": "fal-ai/flux-2-pro",
+    "graphic": "fal-ai/recraft-v3",
+    "decoration": "fal-ai/flux/schnell",
+    "atmosphere": "fal-ai/flux-2-pro",
+    "illustration": "fal-ai/nano-banana-2",
+}
+
+ASSET_MODEL_HINTS = {
+    "flux-schnell": "fal-ai/flux/schnell",
+    "flux-2-pro": "fal-ai/flux-2-pro",
+    "recraft-v3": "fal-ai/recraft-v3",
+    "nano-banana-2": "fal-ai/nano-banana-2",
+    "ideogram-v3": "fal-ai/ideogram-v3",
+    "flux-pro-ultra": "fal-ai/flux-pro/v1.1-ultra",
+}
+
+ASSET_GEN_COSTS = {
+    "fal-ai/flux/schnell": 0.003,
+    "fal-ai/flux-2-pro": 0.03,
+    "fal-ai/recraft-v3": 0.06,
+    "fal-ai/nano-banana-2": 0.08,
+    "fal-ai/ideogram-v3": 0.06,
+    "fal-ai/flux-pro/v1.1-ultra": 0.06,
+}
+
+
+def extract_asset_manifest(approach_content: str) -> list:
+    """Parse ASSET MANIFEST section from approach doc.
+    Returns list of dicts: {name, type, description, width, height, model_hint}"""
+    if "## ASSET MANIFEST" not in approach_content:
+        return []
+    
+    manifest_text = approach_content.split("## ASSET MANIFEST", 1)[1]
+    # Stop at next ## heading
+    for marker in ["## BUILD CONTRACT", "## ANIMATION", "## LAYOUT", "## REQUIRED"]:
+        if marker in manifest_text:
+            manifest_text = manifest_text.split(marker, 1)[0]
+    
+    assets = []
+    current = None
+    for line in manifest_text.strip().split("\n"):
+        line = line.strip()
+        if line.startswith("### "):
+            if current:
+                assets.append(current)
+            name = line[4:].strip().lower().replace(" ", "-").replace("/", "-")
+            current = {"name": name, "type": "texture", "description": "", "width": 1080, "height": 1080}
+        elif current and line.startswith("- type:"):
+            current["type"] = line.split(":", 1)[1].strip().lower()
+        elif current and line.startswith("- description:"):
+            desc = line.split(":", 1)[1].strip().strip('"\'')
+            current["description"] = desc
+        elif current and line.startswith("- dimensions:"):
+            dims = line.split(":", 1)[1].strip()
+            if "x" in dims.lower():
+                parts = dims.lower().split("x")
+                try:
+                    current["width"] = int(parts[0].strip())
+                    current["height"] = int(parts[1].strip())
+                except ValueError:
+                    pass
+        elif current and line.startswith("- model_hint:"):
+            hint = line.split(":", 1)[1].strip().split("(")[0].strip()
+            current["model_hint"] = hint
+        elif current and line.startswith("- ") and not any(line.startswith(f"- {k}:") for k in ["type", "description", "dimensions", "model_hint"]):
+            # Additional description lines
+            if current["description"]:
+                current["description"] += " " + line[2:].strip()
+    
+    if current:
+        assets.append(current)
+    
+    return assets
+
+
+def route_asset_model(asset: dict) -> str:
+    """Route asset to best fal.ai model based on type and optional hint."""
+    if asset.get("model_hint"):
+        mapped = ASSET_MODEL_HINTS.get(asset["model_hint"])
+        if mapped:
+            return mapped
+    return ASSET_MODEL_MAP.get(asset.get("type", "texture"), "fal-ai/flux/schnell")
+
+
+def generate_asset(asset: dict, fal_key: str) -> dict:
+    """Generate a single asset via fal.ai. Returns {url, path, name, model, cost}."""
+    import fal_client
+    os.environ["FAL_KEY"] = fal_key
+    
+    model = route_asset_model(asset)
+    prompt = asset["description"]
+    
+    # Enhance prompt based on type
+    if asset["type"] == "texture":
+        prompt += ", seamless, high quality, 8k texture"
+    elif asset["type"] == "product":
+        prompt += ", studio photography, clean background, dramatic lighting, high detail"
+    elif asset["type"] == "graphic":
+        prompt += ", clean design, transparent background, high contrast"
+    elif asset["type"] == "atmosphere":
+        prompt += ", cinematic, atmospheric, moody lighting"
+    
+    try:
+        result = fal_client.subscribe(
+            model,
+            arguments={
+                "prompt": prompt,
+                "image_size": {
+                    "width": asset.get("width", 1080),
+                    "height": asset.get("height", 1080),
+                },
+                "num_images": 1,
+            },
+        )
+        
+        img_url = result["images"][0]["url"]
+        cost = ASSET_GEN_COSTS.get(model, 0.05)
+        track_cost(model, 0, 0, "asset_gen", override_cost=cost)
+        
+        return {
+            "url": img_url,
+            "name": asset["name"],
+            "type": asset.get("type", "texture"),
+            "model": model,
+            "cost": cost,
+            "width": asset.get("width", 1080),
+            "height": asset.get("height", 1080),
+            "prompt": prompt[:200],
+        }
+    except Exception as e:
+        print(f"    [asset-gen] Error generating {asset['name']}: {e}")
+        return None
+
+
+def asset_gen_node(state: PipelineState) -> dict:
+    """Phase 3.5: Generate visual assets from designers' asset manifests via fal.ai."""
+    print(f"[ASSET GEN] Processing {len(state['approaches'])} approaches")
+    span = tracer.start_span("asset_gen", input={"approach_count": len(state["approaches"])})
+    
+    fal_key = os.environ.get("FAL_KEY", "b93c5940-0082-405b-9684-c1fed78c009f:957b94e1bb6636f8c7a19b01d96cacbd")
+    run_dir = RUNS_DIR / state["name"]
+    assets_dir = run_dir / "assets"
+    assets_dir.mkdir(parents=True, exist_ok=True)
+    
+    all_assets = {}  # designer_id -> list of generated assets
+    total_generated = 0
+    
+    for approach in state["approaches"]:
+        if approach.get("status") not in ("done", "approved", None):
+            continue
+        
+        designer_id = approach["designer_id"]
+        manifest = extract_asset_manifest(approach["content"])
+        
+        if not manifest:
+            print(f"  [asset-gen] Designer {designer_id}: no asset manifest — skipping")
+            all_assets[designer_id] = []
+            continue
+        
+        print(f"  [asset-gen] Designer {designer_id}: {len(manifest)} assets to generate")
+        concept_dir = assets_dir / f"concept-{designer_id}"
+        concept_dir.mkdir(parents=True, exist_ok=True)
+        
+        generated = []
+        for asset in manifest[:8]:  # max 8 assets per concept
+            print(f"    [asset-gen] Generating: {asset['name']} ({asset['type']}) via {route_asset_model(asset)}")
+            
+            result = generate_asset(asset, fal_key)
+            if not result:
+                continue
+            
+            # Download image to local file
+            try:
+                import urllib.request
+                ext = "jpg"  # fal.ai typically returns JPEG
+                local_path = concept_dir / f"{asset['name']}.{ext}"
+                urllib.request.urlretrieve(result["url"], str(local_path))
+                result["local_path"] = str(local_path)
+                result["size_kb"] = local_path.stat().st_size // 1024
+                print(f"    [asset-gen] ✅ {asset['name']}: {result['size_kb']}KB ({result['model']})")
+                generated.append(result)
+                total_generated += 1
+            except Exception as dl_e:
+                print(f"    [asset-gen] Download error for {asset['name']}: {dl_e}")
+                # Still include URL-only reference
+                result["local_path"] = None
+                generated.append(result)
+                total_generated += 1
+        
+        all_assets[designer_id] = generated
+        
+        # Save manifest for this concept
+        manifest_path = concept_dir / "manifest.json"
+        with open(manifest_path, "w") as f:
+            json.dump(generated, f, indent=2)
+    
+    # Upload all assets to here.now for builder URL access
+    asset_urls = {}
+    if total_generated > 0:
+        try:
+            publish_script = Path(os.path.expanduser("~/.agents/skills/here-now/scripts/publish.sh"))
+            publish_result = subprocess.run(
+                [str(publish_script), str(assets_dir)],
+                capture_output=True, text=True, timeout=60,
+            )
+            for line in publish_result.stdout.split("\n"):
+                line = line.strip()
+                if "here.now" in line and ("http://" in line or "https://" in line):
+                    # Extract URL from the line
+                    for word in line.split():
+                        if "here.now" in word and ("http://" in word or "https://" in word):
+                            base_url = word.rstrip("/")
+                            asset_urls["base"] = base_url
+                            print(f"  [asset-gen] Assets published to: {base_url}")
+                            break
+                    if "base" in asset_urls:
+                        break
+        except Exception as pub_e:
+            print(f"  [asset-gen] Publish failed: {pub_e} — builders will use local paths")
+    
+    # Write a consolidated asset reference file per concept (builder reads this)
+    for approach in state["approaches"]:
+        did = approach["designer_id"]
+        assets = all_assets.get(did, [])
+        
+        if assets:
+            ref_path = assets_dir / f"concept-{did}" / "ASSETS.md"
+            asset_block = "# Generated Assets\n\n"
+            asset_block += "Use these REAL images. Do NOT create CSS gradient/placeholder replacements.\n\n"
+            for a in assets:
+                url = a.get("url", "")
+                if asset_urls.get("base") and a.get("local_path"):
+                    rel = os.path.relpath(a["local_path"], str(assets_dir))
+                    url = f"{asset_urls['base']}/{rel}"
+                    a["hosted_url"] = url
+                asset_block += f"## {a['name']} ({a['type']}, {a['width']}×{a['height']})\n"
+                asset_block += f"- URL: `{url}`\n"
+                asset_block += f"- Embed as: `<img src=\"{url}\" />` or `background-image: url('{url}');`\n"
+                asset_block += f"- Description: {a.get('prompt', '')[:150]}\n\n"
+            
+            ref_path.write_text(asset_block)
+            
+            # Also update the manifest with hosted URLs
+            manifest_path = assets_dir / f"concept-{did}" / "manifest.json"
+            with open(manifest_path, "w") as f:
+                json.dump(assets, f, indent=2)
+    
+    print(f"  [asset-gen] Total: {total_generated} assets generated across {len(state['approaches'])} concepts")
+    
+    tracer.end_span(span, output={"total_generated": total_generated, "by_concept": {str(k): len(v) for k, v in all_assets.items()}})
+    
+    # Store asset metadata in state (not approaches — that's Annotated[list, add])
+    return {"asset_manifest": all_assets, "asset_base_url": asset_urls.get("base", "")}
+
+
 def fan_out_builders(state: PipelineState) -> list:
     """Fan out to 3 parallel builder nodes, each with a different model assignment."""
     model_assignments = ["claude-opus", "gpt-5.4", "gemini-3.1-pro-preview"]
@@ -1176,18 +1497,41 @@ The following moodboard images are at: {moodboard_dir}
             moodboard_ref += f"- {img.name}\n"
         moodboard_ref += "\nOpen and study these images before building. They represent the quality bar and aesthetic direction.\n"
     
+    # Load generated assets for this concept
+    assets_ref = ""
+    asset_images_for_vision = []
+    assets_dir = run_dir / "assets" / f"concept-{approach['designer_id']}"
+    assets_md = assets_dir / "ASSETS.md"
+    if assets_md.exists():
+        assets_ref = f"""
+## 🎨 GENERATED VISUAL ASSETS (CRITICAL — USE THESE)
+
+You have pre-generated visual assets. These are REAL designed images — use them as `<img>` tags or
+CSS `background-image` URLs. Do NOT replace them with CSS gradients, colored divs, or placeholder boxes.
+
+{assets_md.read_text()}
+
+**IMPORTANT:** These assets are the design foundation. Your HTML is the frame — the assets carry the
+visual weight. A build that ignores these assets and uses CSS-only visuals will be rejected.
+"""
+        # Collect asset images for vision input
+        for ext in ["*.jpg", "*.jpeg", "*.png"]:
+            asset_images_for_vision.extend(sorted(assets_dir.glob(ext))[:5])
+    
     task = f"""{persona}
 
 ## Your Task
 Build a complete, working HTML prototype. You have two inputs:
 1. A Creative Narrative (context for understanding the concept)
 2. A BUILD CONTRACT (hard requirements you MUST follow exactly)
+3. GENERATED ASSETS — pre-made images to embed (backgrounds, product shots, graphics)
 
 The Build Contract contains grep-able specs. After you write your HTML, I will programmatically verify:
 - Your file contains the REQUIRED FONTS (exact font-family values)
 - Your file contains the REQUIRED COLORS (exact hex values)
 - Your file does NOT contain any FORBIDDEN fonts or colors
 - Each REQUIRED CSS TECHNIQUE is present
+- Generated assets are referenced in the HTML (img src or background-image URLs)
 
 If verification fails, your build is rejected and you must redo it.
 
@@ -1201,6 +1545,7 @@ If verification fails, your build is rejected and you must redo it.
 ## CODE RECIPES (proven implementations — adapt these, don't reinvent)
 {recipes if recipes else "(No recipes available)"}
 {moodboard_ref}
+{assets_ref}
 
 ---
 
@@ -1240,10 +1585,13 @@ Save to: {run_dir}/builds/{concept_name}.html
     if task_size > budget * 0.85:
         print(f"  ⚠️  Builder {idx}: context at {usage_pct}% — may impact output quality")
     
+    # Combine moodboard + generated assets for vision input
+    all_vision_images = list(all_moodboard) + asset_images_for_vision[:3]
+    
     # Route to appropriate builder based on model
     if builder_model.startswith("gpt") or builder_model.startswith("gemini"):
-        # Direct API — model generates HTML directly, with moodboard vision
-        result = build_direct_api(builder_model, task, build_path, state["name"], moodboard_images=all_moodboard)
+        # Direct API — model generates HTML directly, with moodboard + asset vision
+        result = build_direct_api(builder_model, task, build_path, state["name"], moodboard_images=all_vision_images)
     else:
         # Hermes (Claude) — agent with tool use
         result = run_hermes(f"{state['name']}-builder-{idx}", task, max_time=1800, max_turns=50)
@@ -2049,6 +2397,7 @@ def build_graph():
     graph.add_node("research", research_node)
     graph.add_node("designer", designer_node)
     graph.add_node("approach_gate", approach_gate_node)
+    graph.add_node("asset_gen", asset_gen_node)
     graph.add_node("builder", builder_node)
     graph.add_node("qa", qa_station_node)
     graph.add_node("judge", pairwise_judge_node)
@@ -2060,7 +2409,8 @@ def build_graph():
     graph.add_edge(START, "research")
     graph.add_conditional_edges("research", fan_out_designers, ["designer"])
     graph.add_edge("designer", "approach_gate")
-    graph.add_conditional_edges("approach_gate", fan_out_builders, ["builder"])
+    graph.add_edge("approach_gate", "asset_gen")
+    graph.add_conditional_edges("asset_gen", fan_out_builders, ["builder"])
     graph.add_edge("builder", "qa")
     graph.add_edge("qa", "judge")
     graph.add_edge("judge", "human_gate")
