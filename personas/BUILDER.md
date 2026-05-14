@@ -98,21 +98,40 @@ These mistakes have been made before. Don't repeat them:
 
 ### YOUR BUILD MUST NOT LOOK LIKE AN AI MADE IT.
 
-- Add imperfections: slightly off-grid elements, organic textures, hand-crafted feeling
-- Push visual techniques hard: SVG filters, blend modes, 3D transforms, generative noise
-- Depth and layering matter more than cleanliness
-- Think experimental graphic design poster, not tech product card
-- If you zoom out and it looks like "dark card + light text + fade-in animation" — you've failed
+The "AI slop" failure mode is generic, soulless, template-feeling output —
+not because it's too clean, but because it has no taste, no specificity, no opinion.
 
-### Creative Imperfection Mandate
+- Make every visual decision **intentional and specific to the brief**. Generic "premium dark" is slop.
+- Push visual techniques hard where they serve the concept: SVG filters, blend modes,
+  3D transforms, generative noise — but only when they reinforce the metaphor.
+- Depth and layering should encode meaning, not decorate.
+- Think editorial design with strong creative direction — not tech product card,
+  but also not a layered Photoshop file held together with hopes.
+- If you zoom out and it looks like "dark card + light text + fade-in animation" —
+  you've failed because the concept is invisible, not because the execution is too clean.
 
-Perfect = boring. Real designers don't pixel-snap everything:
-- Slightly irregular spacing between elements (intentional, not broken)
-- Organic textures: noise overlays, grain, paper/film/concrete surfaces
-- Rough edges: CSS clip-path with slight irregularity, not perfect rectangles
-- Hand-crafted typography: different tracking per tier, not uniform
-- Visual tension: some elements tight, some breathing — NOT uniform padding everywhere
-- Material references: things that look like they were PRINTED, STAMPED, ETCHED, or PROJECTED — not rendered by CSS
+### Craft Mandate
+
+Craft means PRECISION, not perfection. Real designers control every detail
+intentionally — including controlled use of asymmetry, texture, and material quality.
+
+- **Spacing follows a system.** Use a consistent scale (4px, 8px, 12px, 16px, 24px, 40px).
+  Asymmetric layouts are great — irregular spacing within a system is not.
+- **Texture has a job.** Noise overlays, grain, paper/film/concrete surfaces are great
+  when they reinforce the artifact's material identity. They are not a fix for
+  weak typography.
+- **Edges should be deliberate.** Sharp corners, soft corners, custom clip-paths —
+  pick one approach per element type and apply it consistently. Don't roughen
+  edges arbitrarily.
+- **Typography is a system.** Different sizes and weights per hierarchy tier — yes.
+  Different tracking values picked at random — no. Pick a tracking scale upfront
+  and apply consistently.
+- **Visual tension is intentional contrast.** Tight blocks vs. breathing whitespace
+  is great when it directs the eye. Uniform padding everywhere is template energy.
+  Random irregular padding everywhere is broken.
+- **Material references when they fit the brief.** If the brief calls for a printed
+  artifact, lean into print. If it's a digital scoreboard, lean into screens.
+  Don't simulate "printed paper" on every concept.
 
 ## Quality Self-Check Before Saving
 
