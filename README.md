@@ -8,32 +8,53 @@ Built with [LangGraph](https://github.com/langchain-ai/langgraph) for orchestrat
 
 Given a creative brief, the pipeline:
 
-1. **Research** — Searches design references via [Refero.design](https://refero.design) MCP, builds a visual moodboard with extracted design tokens
-2. **Design** — 3 parallel designers (Claude Opus, GPT-5.4, Gemini 3.1 Pro) produce approach documents with build contracts
-3. **Approach Gate** — Mechanical + LLM convergence check prevents all 3 designers from producing the same thing
-4. **Asset Generation** — [fal.ai](https://fal.ai) generates textures, product shots, and graphics from designer manifests
-5. **Build** — Each model builds a self-contained HTML artifact with embedded assets
-6. **QA Station** — Playwright-based browser testing: content fidelity, viewport rendering, console errors, animation detection
-7. **Pairwise Judge** — Bidirectional comparison with position-bias control (GPT-4o vision)
-8. **Human Gate** — Creative director reviews via mobile evaluation app, submits structured feedback
-9. **Wiki Ingest** — Feedback routes to technique pages, model profiles, and taste patterns for cross-run learning
+1. **Research** — Searches design references via [Refero.design](https://refero.design) MCP, builds a visual moodboard. Then generates **brief-aware diversification axes** (3 axes tailored to the artifact type, not hardcoded share-card defaults).
+2. **Design** — 3 parallel designers (Claude Opus 4.7, GPT-5.5, Gemini Pro Latest) produce approach docs anchored to their assigned axis.
+3. **Approach Gate** — Mechanical + LLM convergence check on approach docs.
+4. **Asset Generation** — [fal.ai](https://fal.ai) generates textures, product shots, and graphics from designer manifests.
+5. **Build (initial)** — Each model builds a self-contained HTML artifact. The unified builder routes by `builder_mode` so the same node handles all build phases.
+6. **QA Loop** — Per-concept loop. Folds structural checks + walker-driven playability into one source of truth. Loops with builder (`qa_fix` mode, same original model) up to 20 iterations until the artifact is functionally complete.
+7. **Judge Loop** — Per-concept scoring with the REVIEWER persona. Hybrid threshold: weighted total ≥7.0 AND no single dimension <5.0 AND AI Slop not flagged. Below-threshold concepts loop with builder (`judge_polish` mode) using REVIEWER's Priority Fixes as feedback. Up to 20 iterations per concept.
+8. **Pairwise Rank** — Once thresholds pass, bidirectional pairwise tournament ranks survivors for the human's eval app. Position-bias controlled.
+9. **Human Gate** — Creative director reviews via mobile evaluation app, submits structured feedback.
+10. **Wiki Ingest** — Global wiki gets cross-brief lessons. Per-brief learnings auto-route to `<brief>.LEARNINGS.md`.
 
 ## Architecture
 
 ```
-Brief → Research → Designer ×3 → Approach Gate → Asset Gen → Builder ×3 → QA → Judge → Human Gate
-                                                                                          ↓
-                                                                              Wiki ← Structured Feedback
-                                                                                          ↓
-                                                                                    Iterate / Ship
+Brief → Research → Designer ×3 → Approach Gate → Asset Gen → Builder ×3 (initial)
+                                                                       ↓
+                                                              QA Loop (per concept)
+                                                              → builder mode=qa_fix
+                                                              ↑ ×20 max
+                                                                       ↓
+                                                            Judge Loop (per concept)
+                                                            → builder mode=judge_polish
+                                                            ↑ ×20 max
+                                                                       ↓
+                                                              Pairwise Rank
+                                                                       ↓
+                                                                Human Gate
+                                                                       ↓
+                                                              Wiki + LEARNINGS.md
+                                                                       ↓
+                                                              Iterate / Deploy
 ```
 
 **Key design decisions:**
-- **Multi-model diversity** — Claude Opus, GPT-5.4, and Gemini 3.1 Pro as parallel builders prevent monoculture output
-- **Pairwise > scalar scoring** — More reliable for subjective creative evaluation ([research](https://arxiv.org/abs/2403.16950))
-- **File-based memory** — Pipeline Wiki (markdown) over databases. Knowledge compounds across runs without infrastructure
-- **`asset://` protocol** — Builders write lightweight refs, post-processor injects base64 data URIs. Self-contained HTML output
-- **Constitutional evaluation** — Personas accumulate learnings from human verdicts (inspired by [DSPy GEPA](https://arxiv.org/abs/2507.19457))
+
+- **Frontier-only models** — Claude Opus 4.7, GPT-5.5, gemini-pro-latest (Google's server-side alias that auto-tracks the latest Pro).
+- **Per-concept-model continuity** — Concept N is ALWAYS patched by its original builder model across all loop modes. Prevents the convergence failure where a single shared patch model collapses 3 distinct concepts into one.
+- **Unified builder with mode dispatch** — One `builder_node` handles initial / qa_fix / judge_polish via `builder_mode` state. Less code duplication, easier to extend.
+- **Experience walker** — Playwright-driven walker clicks through every build, captures journey screenshots, detects dead/inert prototypes. The judge sees the journey, not just a splash screen.
+- **Threshold-gated quality** — The judge loop pushes builds above an absolute quality threshold (not just relative pairwise wins) before the human ever sees them.
+- **REVIEWER-driven scoring** — The judge persona (REVIEWER.md) is the single source of truth for scoring criteria. The judge prompt compiles {{persona}} verbatim into the system prompt.
+- **Hybrid threshold** — Weighted total ≥7.0 + no dimension <5.0 + AI Slop not flagged. Catches both "weak overall" and "one fatal flaw" failure modes.
+- **Cost circuit breaker** — Hard $20 ceiling per run. If exceeded, both loops break gracefully and proceed to human gate with current state.
+- **Streaming for long calls** — All Anthropic calls >21K tokens use streaming (mandatory per SDK for 10min+ requests).
+- **Per-brief LEARNINGS** — `<brief>.LEARNINGS.md` siblings keep brief-specific lessons scoped. Global wiki holds only cross-brief taste rules.
+- **File-based memory** — Pipeline Wiki (markdown) over databases.
+- **`asset://` protocol with contract enforcement** — Builders reference assets by slug from a strict commissioned list. Hallucinated refs get SVG fallbacks + flagged in QA.
 
 ## Quick Start
 
@@ -123,10 +144,29 @@ The wiki is the pipeline's long-term memory. Raw sources (run artifacts) are imm
 
 ## Evaluation System
 
-The human gate uses a mobile-first evaluation app (generated per-run) that captures:
+The judge layer uses a 7-dimension weighted scoring rubric driven by the REVIEWER persona:
 
+| Dimension | Weight | What it catches |
+|---|---|---|
+| Creative Ambition | 40% | Novel concepts and visual techniques (vs "dark card + light text") |
+| AI Slop Check | 20% (hard-cap) | Center-itis, gradient blobs, safe spacing, template energy. If flagged → weighted total clamped to ≤4.0 |
+| Brief Fit | 20% | Does the build deliver the brief's actual product / sample data / outcome requirements? Wrong product = severe penalty regardless of polish |
+| Distinctiveness | 10% | Does this concept feel meaningfully different from siblings in the same run? Same palette + composition + tech = severe penalty |
+| Visual Depth | 5% | 3D transforms, texture, layering, material quality |
+| Typography | 3% | Genuine hierarchy via weight/size/tracking |
+| Hierarchy & Readability | 2% | Information hierarchy visible at a glance |
+| Technical Execution | binary | Does it render and run? Auto-fail if not |
+
+**Hybrid passing threshold:**
+- Weighted total ≥ 7.0
+- AND no single dimension < 5.0
+- AND AI Slop not flagged
+
+The judge loop iterates with the builder until each concept either passes the threshold or hits 20 iterations.
+
+The human gate then sees pre-polished builds via a mobile-first evaluation app that captures:
 - **Per-concept quick rating** — 🔥 Great / ✅ OK / ❌ Bad
-- **5-dimension scores** — Creative Ambition (40%), AI Slop Check (20%), Visual Depth (15%), Typography (10%), Hierarchy (10%)
+- **Dimension scores** — mirrors the judge rubric
 - **Technique tags** — Landed / Standout / Partial / Missed
 - **Freeform notes** per concept
 
@@ -142,10 +182,11 @@ Optional `--design-system` flag enforces token compliance:
 
 ## Cost
 
-Typical run: **$0.30 - $0.90** depending on iteration rounds.
-- Budget cap: `MAX_COST_USD = 20.0` with 80% alert
+Typical run: **$2 - $10** with the QA + Judge loops active, depending on iteration depth.
+- Hard cap: `MAX_COST_USD = 20.0` (cost circuit breaker; both loops abort and proceed to human gate when hit)
 - Asset generation: $0.003 - $0.08 per image (fal.ai)
 - Per-call token tracking with cost report JSON per run
+- Frontier-model output budgets: Opus 4.7 (128K), GPT-5.5 (100K), Gemini Pro Latest (65K) — streaming on all >21K calls
 
 ## Key Learnings (from 15+ pipeline runs)
 
