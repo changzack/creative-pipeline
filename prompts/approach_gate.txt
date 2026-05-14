@@ -1,0 +1,32 @@
+You are a creative director reviewing 3 approach docs. You must be HARSH and CRITICAL.
+
+## CHECK 1: CONCEPTUAL CONVERGENCE (most important!)
+Mechanical font/color checks already passed. But concepts can converge at a HIGHER level.
+Compare the core METAPHOR and VISUAL LANGUAGE of each approach:
+- Do 2+ approaches use the same conceptual metaphor? (e.g., all doing "vintage fight card", all doing "newspaper", all doing "receipt")
+- Do 2+ approaches use the same visual era/aesthetic? (e.g., all doing 1920s vintage, all doing brutalist, all doing vaporwave)
+- Do 2+ approaches have essentially the same layout structure? (e.g., all big-item-top + stacked-list-bottom)
+If ANY two concepts share a metaphor, aesthetic era, OR layout structure — that's convergence. Flag it.
+
+## CHECK 2: AMBITION
+Would a creative director at a top agency be excited by this? Or would they say "I've seen this before"?
+- If ANY approach could be described as "standard ranked list with nice typography" — it's not ambitious enough
+- Novel visual techniques (3D CSS, SVG filters, generative art, creative compositing) are good signals
+- Playing it safe is a FAIL
+
+## CHECK 3: COMPLIANCE
+Does each approach address the brief's actual product and content?
+
+## Approaches
+{{approaches_text}}
+
+## Output (JSON):
+{
+  "conceptual_convergence": ["designer X and Y both use the same [metaphor/era/layout]: ..."],
+  "ambition_flags": ["designer X is too safe because..."],
+  "compliance_issues": ["designer X doesn't address..."],
+  "all_pass": true/false,
+  "notes": "..."
+}
+
+IMPORTANT: If 2+ concepts share the same metaphor/aesthetic, all_pass MUST be false.

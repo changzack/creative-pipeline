@@ -1,0 +1,96 @@
+{{persona}}
+
+---
+
+# YOUR TASK FOR THIS CALL — Per-Build Scoring
+
+You are now scoring ONE concept against the calibrated weights in the persona above. This is NOT a pairwise comparison. You will see:
+
+1. **Brief context** — the product / sample data / outcome the build was supposed to deliver
+2. **This concept's approach doc** — what the designer SAID they'd build
+3. **Other concepts' approach summaries** — for the Distinctiveness dimension only
+4. **Walker journey screenshots for THIS concept** — initial state + state-change frames captured by clicking through the interactive prototype
+5. **Moodboard references** — the visual direction the build was supposed to match
+
+## Required protocol
+
+Follow the persona's Scoring Process. Specifically:
+
+1. Read the approach doc first. Note the techniques the designer promised.
+2. Look at the journey screenshots cold. Write a 1-sentence gut reaction.
+3. Run the Anti-Pattern checklist. Flag every instance you can see.
+4. Verify approach-doc compliance technique by technique — implemented? visible on screen?
+5. Compare against siblings on Distinctiveness (palette family, composition pattern, primary visual technique). Two siblings with the same palette + same technique = each one's Distinctiveness drops hard.
+6. Check the Technical Execution binary gate:
+   - If the build does not render (blank journey, fatal errors, missing fonts) → clamp `weighted_total` to ≤3.0 regardless of category scores.
+7. Score each weighted dimension starting from 5.0. Earn points up. Don't start high and dock.
+8. If you flag AI Slop, clamp `weighted_total` to ≤4.0.
+9. Produce the Priority Fixes list. These will be fed back to the builder for the next polish iteration, so they must be CONCRETE and ACTIONABLE — "tighten the type" is useless; "drop body to 14px, drop tracking to -0.01em, add a 600-weight subhead above each item" is useful.
+
+## Required output — JSON ONLY
+
+Respond with VALID JSON in the schema below. No markdown fences, no prose before or after the JSON. If you must include a "thinking" pass, keep it inside the `gut_reaction` field.
+
+```json
+{
+  "concept_index": <int>,
+  "gut_reaction": "<one sentence>",
+  "anti_pattern_flags": ["centeritis", "gradient_blobs", "safe_spacing", "default_border_radius", "white_on_dark_only", "one_font_one_weight", "sequential_fade_in", "described_not_implemented", "placeholder_energy", "template_vibes"],
+  "approach_compliance": [
+    {"technique": "<verbatim from approach doc>", "implemented": true, "visible": true, "notes": "<one sentence>"}
+  ],
+  "renders_and_runs": true,
+  "ai_slop_flagged": false,
+  "scores": {
+    "creative_ambition": <0.0-10.0>,
+    "ai_slop_check": <0.0-10.0>,
+    "brief_fit": <0.0-10.0>,
+    "visual_depth": <0.0-10.0>,
+    "distinctiveness": <0.0-10.0>,
+    "typography": <0.0-10.0>,
+    "hierarchy_readability": <0.0-10.0>
+  },
+  "weighted_total": <0.0-10.0>,
+  "weighted_total_breakdown": "<formula showing how you computed it, e.g. 'CA 7×0.30 + AS 9×0.20 + BF 8×0.20 + VD 6×0.10 + DIST 7×0.10 + TY 5×0.05 + HR 6×0.05 = 7.15'>",
+  "priority_fixes": {
+    "p0_broken": ["<concrete actionable fix>"],
+    "p1_must_fix": ["<concrete actionable fix>"],
+    "p2_polish": ["<concrete actionable fix>"]
+  },
+  "verdict": "above_bar" | "below_bar",
+  "verdict_reason": "<one sentence — which dimension(s) dragged the score, or what pushed it above bar>"
+}
+```
+
+## Weights (must match the persona — included here for redundancy)
+
+Use these EXACT weights when computing `weighted_total`:
+
+- Creative Ambition: 0.40
+- AI Slop Check: 0.20
+- Visual Depth: 0.15
+- Typography: 0.10
+- Hierarchy & Readability: 0.10
+- Technical Execution: 0.05
+
+If you see `brief_fit` and `distinctiveness` in the persona's Calibrated Scoring Weights table (proposed version), use those weights instead:
+
+- Creative Ambition: 0.30
+- AI Slop Check: 0.20
+- Brief Fit: 0.20
+- Visual Depth: 0.10
+- Distinctiveness: 0.10
+- Typography: 0.05
+- Hierarchy & Readability: 0.05
+
+Pick ONE weighting scheme based on what the persona above describes, and use it consistently. Always include all 7 score fields in the JSON output (even if a dimension's weight is 0 in the active scheme — score it anyway for diagnostic value).
+
+## Hard pass/fail rules
+
+A concept's `verdict` is `"above_bar"` only if ALL of the following hold:
+- `weighted_total >= 7.0`
+- Every dimension in `scores` is `>= 5.0`
+- `ai_slop_flagged == false`
+- `renders_and_runs == true`
+
+Otherwise, `verdict` is `"below_bar"` and your Priority Fixes will drive the next builder iteration. Be specific. Be useful. The build will be patched against your `p0_broken` and `p1_must_fix` items in order.
