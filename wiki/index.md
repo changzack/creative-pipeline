@@ -1,6 +1,6 @@
 # Pipeline Wiki — Index
 
-Last updated: 2026-05-03
+Last updated: 2026-05-13
 
 ## Aesthetics (Taste Model)
 - [Anti-Patterns](aesthetics/anti-patterns.md) — What fails, banned aesthetics, risky patterns
@@ -23,6 +23,7 @@ Last updated: 2026-05-03
 - [Asset Integration](builds/asset-integration.md) — fal.ai model routing, trademark filtering, asset:// protocol
 - [Mobile Viewport](builds/mobile-viewport.md) — CSS zoom vs transform, GSAP autoAlpha bug
 - [Content Fidelity](builds/content-fidelity.md) — preventing moodboard content drift
+- [Experience Walker](builds/experience-walker.md) — journey-aware judging, dead/inert prototype detection (added 2026-05-13)
 
 ## Run Summaries
 _(backfill in progress)_

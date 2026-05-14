@@ -17,12 +17,14 @@ The #1 predictor of a build being rated "acceptable" is **physical metaphor + cr
 - QA station catches content fidelity, mobile viewport, console errors
 - Design system enforcement (`--design-system` flag)
 - Bidirectional pairwise judging
+- Experience walker (added 2026-05-13) — judge sees an ordered journey of screenshots per build, plus dead/inert-prototype signals. Brief-agnostic. See [[builds/experience-walker]].
 
 ### Current Weaknesses
-- **No "great" builds yet** — acceptable is the ceiling
+- **No "great" builds yet** — acceptable is the ceiling (V3k-SMPLX got the first 'great' — still rare)
 - **Asset generation limited** — trademark filtering blocks product shots (highest-value asset)
 - **Design system compliance** — builders ignore constraints even when told to enforce (V3k: GPT used Space Grotesk)
 - **Evaluation loop** — human feedback doesn't compound automatically yet (this wiki is the fix)
+- **Walker doesn't drive sliders/keyboard inputs intelligently** — builds with precise-value controls need click-driven fallbacks
 
 ### What Would Move the Needle
 1. **Fix product shot generation** — rephrase prompts to avoid brand names
