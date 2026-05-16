@@ -240,8 +240,8 @@ class PipelineTracer:
 
         try:
             self._client = Langfuse(
-                public_key=public_key or os.environ.get("LANGFUSE_PUBLIC_KEY", "pk-lf-pipeline-v3"),
-                secret_key=secret_key or os.environ.get("LANGFUSE_SECRET_KEY", "sk-lf-pipeline-v3-secret2026"),
+                public_key=public_key or os.environ.get("LANGFUSE_PUBLIC_KEY", ""),
+                secret_key=secret_key or os.environ.get("LANGFUSE_SECRET_KEY", ""),
                 host=host or os.environ.get("LANGFUSE_HOST", "http://localhost:3000"),
             )
             self._enabled = True

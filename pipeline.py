@@ -17,6 +17,7 @@ import subprocess
 import itertools
 import time
 import argparse
+import uuid
 from pathlib import Path
 from typing import TypedDict, Annotated, Literal, Optional, List, Dict
 from operator import add
@@ -42,6 +43,32 @@ def _merge_dict(left: Optional[dict], right: Optional[dict]) -> dict:
     return merged
 
 
+def _merge_dict_of_dicts(left: Optional[dict], right: Optional[dict]) -> dict:
+    """LangGraph reducer for Dict[str, Dict[K, V]] state fields.
+
+    Mirrors ``_merge_dict`` semantics:
+      - Empty-right (``{}``) signals a full reset.
+      - Otherwise shallow-merges OUTER keys; for outer keys present in BOTH
+        sides, the INNER dicts are shallow-merged (right wins on inner-key
+        conflicts).
+    Used by the unified polish_loop_node so per-loop_type ("qa" / "judge")
+    state stays isolated while still routing through a single reducer.
+    """
+    if right is None:
+        return left or {}
+    if not right:
+        return {}
+    merged = {k: dict(v) if isinstance(v, dict) else v for k, v in (left or {}).items()}
+    for outer_key, inner in right.items():
+        if isinstance(inner, dict) and isinstance(merged.get(outer_key), dict):
+            inner_merged = dict(merged[outer_key])
+            inner_merged.update(inner)
+            merged[outer_key] = inner_merged
+        else:
+            merged[outer_key] = dict(inner) if isinstance(inner, dict) else inner
+    return merged
+
+
 def _last_wins(left, right):
     """LangGraph reducer for scalar fields written by parallel fan-outs.
 
@@ -60,6 +87,16 @@ from openai import OpenAI
 
 # Observability
 from langfuse_tracing import tracer, prompts, estimate_tokens
+# Pass 1 supervision (better-job-supervision). NEVER raises; best-effort I/O.
+import _supervisor as _sup
+from _supervisor import (
+    init as _sup_init,
+    emit_event as _sup_emit,
+    emit_cost as _sup_cost,
+    set_current_phase as _sup_phase,
+    shutdown as _sup_shutdown,
+    supervised as _supervised,
+)
 
 # ── Config ──────────────────────────────────────────────────────
 WORKSPACE = Path(os.path.expanduser("~/.openclaw/workspace"))
@@ -212,6 +249,12 @@ def track_cost(model: str, input_tokens: int, output_tokens: int, phase: str = "
         if not _run_costs.get("_breaker_logged"):
             print(f"  ⛔ BUDGET EXCEEDED: ${_run_costs['total_usd']:.2f} > ${MAX_COST_USD:.2f} — cost circuit broken. Loops will stop spending.")
             _run_costs["_breaker_logged"] = True
+    # Pass 1 supervision: emit incremental cost event + cost.jsonl line.
+    try:
+        _sup_cost(model, input_tokens or 0, output_tokens or 0,
+                  cost, _run_costs["total_usd"], phase)
+    except Exception:
+        pass
     return cost
 
 
@@ -242,6 +285,7 @@ class PipelineState(TypedDict):
     research: Optional[dict]
     moodboard: list[str]  # paths to reference images
     diversification_axes: Optional[list]  # Bug A: per-run designer-axis configs
+    scope_contract: Optional[dict]  # Option 2 (2026-05-14): brief-derived deliverables checklist
                                           # (replaces hardcoded share-card-shaped eras)
     
     # Fan-in from parallel agents (Annotated[list, add] = auto-concatenate)
@@ -274,6 +318,22 @@ class PipelineState(TypedDict):
     judge_status: Annotated[Dict[int, str], _merge_dict]             # "above_bar" | "below_bar" | "failed_max" | "cost_circuit"
     judge_max_iter: Optional[int]                                    # override for MAX_JUDGE_ITERATIONS
     judge_threshold: Optional[dict]                                  # override for JUDGE_DEFAULT_THRESHOLD
+
+    # ── Unified Polish Loop (Option A + B1, 2026-05-15) ─────────────────────
+    # These fields are written ONLY by the unified `polish_loop_node` when the
+    # `--use-unified-polish-loop` CLI flag is True. When the flag is False (the
+    # current default), the legacy qa_*/judge_* fields above are populated by
+    # the legacy `qa_loop_node` / `judge_loop_node` and these stay empty.
+    #
+    # Outer-dict keys are the loop_type label ("qa" | "judge"); inner dicts are
+    # the per-concept-index payloads (same shape as their legacy counterparts).
+    # The 16 existing checkpoint threads in pipeline.db remain readable because
+    # we did NOT remove the legacy fields — that cleanup happens in step 11.
+    polish_iterations: Annotated[Dict[str, Dict[int, int]], _merge_dict_of_dicts]
+    polish_status:     Annotated[Dict[str, Dict[int, str]], _merge_dict_of_dicts]
+    polish_reports:    Annotated[Dict[str, Dict[int, dict]], _merge_dict_of_dicts]
+    polish_max_iter:   Optional[Dict[str, int]]                       # {"qa": 20, "judge": 20}
+    polish_threshold:  Optional[Dict[str, dict]]                      # {"judge": {...}}; "qa" is None
 
     # Cost circuit breaker — set when MAX_COST_USD is exceeded mid-loop.
     cost_circuit_broken: Optional[bool]
@@ -708,8 +768,10 @@ def validate_asset_references(html_path: Path, manifest_path: Path) -> dict:
     global _ASSET_URL_RE
     import re as _re
     if _ASSET_URL_RE is None:
-        # Match asset://<slug>. Stop at quotes, whitespace, parens, or `)`.
-        _ASSET_URL_RE = _re.compile(r"asset://([^\"'\s)<>]+)")
+        # Greedy match — do NOT stop at `)`, because manifest slugs legitimately
+        # contain parenthetical text (e.g. "badge-glyph-set-(3-tiers)"). We strip
+        # trailing wrapper punctuation in the normalization pass below.
+        _ASSET_URL_RE = _re.compile(r"asset://([^\"'\s<>]+)")
 
     result = {"matched": [], "missing": [], "extra_in_manifest": []}
 
@@ -717,21 +779,7 @@ def validate_asset_references(html_path: Path, manifest_path: Path) -> dict:
         return result
     html_text = html_path.read_text()
 
-    raw_refs = _ASSET_URL_RE.findall(html_text)
-    # Normalize: strip image extension + percent-decode.
-    seen = set()
-    normalized_refs = []
-    for raw in raw_refs:
-        slug = _decode_asset_slug(raw)
-        for ext in (".jpg", ".jpeg", ".png", ".webp", ".gif"):
-            if slug.lower().endswith(ext):
-                slug = slug[: -len(ext)]
-                break
-        if slug in seen:
-            continue
-        seen.add(slug)
-        normalized_refs.append(slug)
-
+    # Build manifest name set first so normalization can consult it.
     manifest_names = set()
     if manifest_path.exists():
         try:
@@ -742,6 +790,55 @@ def validate_asset_references(html_path: Path, manifest_path: Path) -> dict:
                     manifest_names.add(_decode_asset_slug(name))
         except Exception:
             pass
+
+    def _strip_ext(s: str) -> str:
+        for ext in (".jpg", ".jpeg", ".png", ".webp", ".gif"):
+            if s.lower().endswith(ext):
+                return s[: -len(ext)]
+        return s
+
+    # Trailing wrapper chars that appear when an asset:// URL is embedded in
+    # CSS `url(asset://foo)`, quoted attributes that bled through, JSON, etc.
+    # We only peel these if peeling produces a manifest hit; otherwise we keep
+    # the raw slug so true hallucinations are reported faithfully.
+    _TRAILING_WRAPPERS = ")}],;.\"'"
+
+    seen = set()
+    normalized_refs = []
+    raw_refs = _ASSET_URL_RE.findall(html_text)
+    for raw in raw_refs:
+        decoded = _decode_asset_slug(raw)
+        base = _strip_ext(decoded)
+        # Candidates: full slug first, then progressively peel trailing wrapper
+        # punctuation. First manifest hit wins.
+        candidates = [base]
+        peeled = base
+        while peeled and peeled[-1] in _TRAILING_WRAPPERS:
+            peeled = peeled[:-1]
+            candidates.append(peeled)
+        # Also try with extension stripped from the original (in case peel
+        # exposed a new extension boundary, e.g. "foo.jpg)" -> "foo.jpg" -> "foo")
+        candidates.extend(_strip_ext(c) for c in list(candidates))
+        slug = None
+        for cand in candidates:
+            if cand in manifest_names:
+                slug = cand
+                break
+        if slug is None:
+            # No manifest hit — this is a likely hallucination. Still strip
+            # *unbalanced* trailing `)` (from CSS `url(asset://made-up)` wrapper)
+            # and other obvious structural noise so the reported slug isn't
+            # contaminated by syntax that wasn't part of the slug itself.
+            slug = base
+            if slug.endswith(")") and slug.count(")") > slug.count("("):
+                slug = slug[:-1]
+            # Trim trailing common terminators that are clearly not slug chars.
+            while slug and slug[-1] in ";,\"'":
+                slug = slug[:-1]
+        if slug in seen:
+            continue
+        seen.add(slug)
+        normalized_refs.append(slug)
 
     for ref in normalized_refs:
         if ref in manifest_names:
@@ -1107,7 +1204,17 @@ def check_design_system_compliance(html_path: Path, design_system: str) -> dict:
 # ── Utility Functions ───────────────────────────────────────────
 
 def run_hermes(job_id: str, task_content: str, max_time: int = 1200, max_turns: int = 40) -> dict:
-    """Spawn a Hermes agent job (fully detached) and wait for completion."""
+    """Spawn a Hermes agent job (fully detached) and wait for completion.
+
+    All pipeline.py-invoked Hermes jobs run in the "pipeline" profile via
+    --mode pipeline. That profile has tirith scanning disabled so legitimate
+    pipeline patterns (e.g. `python -c "import pipeline"`, asset shuffling,
+    env-loading from run-pipeline.sh) don't get blocked. All other Hermes
+    usage — chat sessions, ad-hoc delegations, exploration — stays on the
+    default profile with full tirith scanning. See:
+      ~/.hermes/profiles/pipeline/config.yaml  (rationale + blast-radius mitigations)
+      ~/.openclaw/workspace/MEMORY.md         (Option C § Tirith policy)
+    """
     job_dir = Path(f"/tmp/hermes-jobs/{job_id}")
     job_dir.mkdir(parents=True, exist_ok=True)
     
@@ -1117,10 +1224,12 @@ def run_hermes(job_id: str, task_content: str, max_time: int = 1200, max_turns: 
     
     # Use hermes-run.sh which handles detachment properly
     # The bridge script uses nohup + subshell + disown
+    # --mode pipeline routes to ~/.hermes/profiles/pipeline (trusted mode).
     spawn = subprocess.Popen(
         ["bash", str(HERMES_BRIDGE), "--job-id", job_id,
          "--task-file", str(task_file),
-         "--max-time", str(max_time), "--max-turns", str(max_turns), "--quiet"],
+         "--max-time", str(max_time), "--max-turns", str(max_turns),
+         "--mode", "pipeline", "--quiet"],
         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
         start_new_session=True,  # Fully detach from parent process group
     )
@@ -1169,6 +1278,205 @@ def estimate_cost(model: str, input_tokens: int, output_tokens: int) -> float:
 
 # ── Pipeline Nodes ──────────────────────────────────────────────
 
+@_supervised("scope_contract")
+def scope_contract_node(state: PipelineState) -> dict:
+    """Phase 0.25: Extract a strict deliverables checklist from the brief.
+
+    Runs ONCE before research, produces a JSON contract describing what the
+    artifact must contain (screens, data shape, interactions, non-negotiables).
+    Injected into the builder prompt as a structural requirements block
+    ABOVE the approach doc so completeness becomes non-negotiable while
+    visual interpretation stays free.
+
+    Static briefs (share cards, posters) produce a minimal contract with
+    is_multistep=false and the downstream pipeline treats it as a no-op.
+
+    Option 2 (2026-05-14): introduced to fix the v4/v5/v6 failure mode where
+    initial builds shipped only 1 of N required rounds. See plan:
+    ~/.openclaw/workspace/memory/plans/option-2-brief-scope-contract.md
+    """
+    print(f"[SCOPE CONTRACT] Extracting deliverables checklist for: {state['name']}")
+    span = tracer.start_span("scope_contract", input={"name": state["name"], "brief_len": len(state.get("brief", ""))})
+
+    run_dir = RUNS_DIR / state["name"]
+    run_dir.mkdir(parents=True, exist_ok=True)
+
+    system_prompt = (
+        "You are a senior creative technology PM extracting a strict deliverables "
+        "checklist from a creative brief. Output a JSON contract describing WHAT "
+        "must exist in the final artifact (structure, data, interactions) — NOT how "
+        "it should look. Be specific. Use numeric counts where the brief implies "
+        "them. Surface non-negotiables that builders commonly miss when reading "
+        "the brief in one pass."
+    )
+
+    user_prompt = (
+        f"BRIEF:\n\n{state['brief']}\n\n"
+        "---\n\n"
+        "Extract a JSON contract with EXACTLY this schema (no prose before/after, "
+        "no markdown fences, just raw JSON):\n\n"
+        "{\n"
+        '  "artifact_type": "<short label, e.g. \'stateful game\', \'share card\', \'landing page\'>",\n'
+        '  "is_multistep": <true if the artifact has multiple rounds/screens/steps the user navigates; false for single-scene artifacts>,\n'
+        '  "required_screens": [<list of distinct screens/views the artifact must contain, derived from the brief; empty list for single-scene artifacts>],\n'
+        '  "required_data": {\n'
+        '    "<entity_name>": {\n'
+        '      "count": <integer from brief, or null>,\n'
+        '      "fields": [<list of fields each entity must have>]\n'
+        '    }\n'
+        '  },\n'
+        '  "required_interactions": [<list of distinct user actions/state transitions the build must support>],\n'
+        '  "non_negotiables": [<list of structural requirements builders commonly miss — e.g. \'rounds 2-5 must have distinct content, not copy of round 1\'>],\n'
+        '  "explicitly_banned": [<list of common misinterpretations of this brief to avoid>]\n'
+        "}\n\n"
+        "Guidance:\n"
+        "- Only include entities/data that the BRIEF explicitly requires. Do not invent.\n"
+        "- For static briefs (a single share card, poster, hero page), set is_multistep=false, "
+        "required_screens=[], required_data={}, required_interactions=[], and use "
+        "non_negotiables/explicitly_banned sparingly. The contract should be near-empty.\n"
+        "- For stateful briefs (games, quizzes, flows), be exhaustive about distinct "
+        "content per step. If brief says 5 customers, list every field each customer "
+        "needs based on what the brief describes.\n"
+        "- non_negotiables should call out structural traps. Common ones: \"all N items "
+        "must be reachable in the initial build\", \"items 2-N must have distinct content "
+        "from item 1\", \"no placeholder TODOs in final data\".\n"
+        "- explicitly_banned should call out common misinterpretations. Common ones: "
+        "\"single-scene cinematic that skips the round structure\", \"share card only "
+        "without gameplay loop\", \"reveal screen without the steps that produced it\".\n"
+    )
+
+    contract_json = {}
+    contract_raw = ""
+    try:
+        from anthropic import Anthropic as _A
+        _client = _A()
+        msg = _client.messages.create(
+            model=PINNED_MODELS.get("claude-opus", "claude-opus-4-5-20250929"),
+            max_tokens=4000,
+            system=system_prompt,
+            messages=[{"role": "user", "content": user_prompt}],
+        )
+        contract_raw = "".join(block.text for block in msg.content if hasattr(block, "text"))
+        # Strip code fences if model wrapped output despite instructions
+        cleaned = contract_raw.strip()
+        if cleaned.startswith("```"):
+            cleaned = cleaned.split("```", 2)[1] if "```" in cleaned[3:] else cleaned
+            cleaned = cleaned.lstrip("json").lstrip("\n").rstrip("`").strip()
+        import json as _json
+        contract_json = _json.loads(cleaned)
+        # Track cost
+        try:
+            usage = msg.usage
+            in_t = getattr(usage, "input_tokens", 0)
+            out_t = getattr(usage, "output_tokens", 0)
+            cost = compute_call_cost("claude-opus", in_t, out_t)
+            track_phase_cost(state, "scope_contract", cost)
+        except Exception:
+            pass
+    except Exception as e:
+        print(f"  ⚠️  scope contract extraction failed: {e}")
+        # Fallback: empty contract — pipeline runs as before, no injection
+        contract_json = {
+            "artifact_type": "unknown",
+            "is_multistep": False,
+            "required_screens": [],
+            "required_data": {},
+            "required_interactions": [],
+            "non_negotiables": [],
+            "explicitly_banned": [],
+            "_extraction_error": str(e),
+        }
+
+    # Persist for human inspection + audit
+    import json as _json
+    contract_path = run_dir / "scope-contract.json"
+    contract_path.write_text(_json.dumps(contract_json, indent=2))
+    print(f"  📋 scope contract: artifact_type={contract_json.get('artifact_type')}, "
+          f"multistep={contract_json.get('is_multistep')}, "
+          f"screens={len(contract_json.get('required_screens', []))}, "
+          f"non_negotiables={len(contract_json.get('non_negotiables', []))}")
+    print(f"  💾 saved: {contract_path}")
+
+    tracer.end_span(span, output={
+        "artifact_type": contract_json.get("artifact_type"),
+        "is_multistep": contract_json.get("is_multistep"),
+        "num_screens": len(contract_json.get("required_screens", [])),
+        "num_data_entities": len(contract_json.get("required_data", {})),
+        "num_interactions": len(contract_json.get("required_interactions", [])),
+        "num_non_negotiables": len(contract_json.get("non_negotiables", [])),
+        "num_banned": len(contract_json.get("explicitly_banned", [])),
+    })
+
+    return {"scope_contract": contract_json}
+
+
+def _format_scope_contract_for_builder(contract: Optional[dict]) -> str:
+    """Format the scope contract as a non-negotiables block for the builder prompt.
+
+    Returns an empty string for static briefs (is_multistep=False with no
+    required entities/screens) so the prompt isn't padded with empty headers
+    for share-card-style runs.
+    """
+    if not contract or not isinstance(contract, dict):
+        return ""
+    if contract.get("_extraction_error"):
+        return ""
+
+    is_multistep = contract.get("is_multistep", False)
+    screens = contract.get("required_screens", []) or []
+    data = contract.get("required_data", {}) or {}
+    interactions = contract.get("required_interactions", []) or []
+    non_neg = contract.get("non_negotiables", []) or []
+    banned = contract.get("explicitly_banned", []) or []
+
+    # Static briefs with no real requirements — skip the block entirely
+    if not is_multistep and not screens and not data and not interactions and not non_neg and not banned:
+        return ""
+
+    lines = [
+        "## \u26a0\ufe0f NON-NEGOTIABLE DELIVERABLES (your build will be checked against this)",
+        "",
+        "The brief requires a SPECIFIC structure. The visual approach is your creative "
+        "interpretation — but the items below MUST exist in the build. Do NOT skip rounds, "
+        "compress multi-step flows into single scenes, or ship hardcoded round-1 only.",
+        "",
+        f"**Artifact type:** {contract.get('artifact_type', 'unknown')}",
+        f"**Multi-step:** {is_multistep}",
+        "",
+    ]
+    if screens:
+        lines.append(f"**Required screens ({len(screens)}):**")
+        for s in screens:
+            lines.append(f"- {s}")
+        lines.append("")
+    if data:
+        lines.append("**Required data (must be present in HTML/JS, not just stubs):**")
+        for entity, spec in data.items():
+            count = spec.get("count") if isinstance(spec, dict) else None
+            fields = spec.get("fields", []) if isinstance(spec, dict) else []
+            count_str = f" \u00d7 {count}" if count else ""
+            fields_str = (", ".join(fields)) if fields else ""
+            lines.append(f"- **{entity}**{count_str}: {fields_str}")
+        lines.append("")
+    if interactions:
+        lines.append(f"**Required interactions ({len(interactions)}):**")
+        for i in interactions:
+            lines.append(f"- {i}")
+        lines.append("")
+    if non_neg:
+        lines.append("**Non-negotiables (builders commonly miss these):**")
+        for n in non_neg:
+            lines.append(f"- \u26d4 {n}")
+        lines.append("")
+    if banned:
+        lines.append("**Explicitly banned (do NOT do these):**")
+        for b in banned:
+            lines.append(f"- \u274c {b}")
+        lines.append("")
+    return "\n".join(lines)
+
+
+@_supervised("research")
 def research_node(state: PipelineState) -> dict:
     """Phase 0.5: Visual research + moodboard."""
     print(f"[RESEARCH] Starting visual research for: {state['name']}")
@@ -1187,7 +1495,10 @@ def research_node(state: PipelineState) -> dict:
     rubric = load_reference("art-direction-rubric.md")
     patterns = load_reference("creative-patterns.md")
     wiki_context = get_wiki_context(_brief_path_from_state(state))
-    past_learnings = get_relevant_learnings(state["brief"])  # legacy, will phase out
+    # Legacy past_learnings injection removed 2026-05-14: it was pulling
+    # share-card-era verdicts from techniques.json into every brief's research
+    # prompt, contaminating non-share-card runs. The two-tier wiki context
+    # (global-taste-rules.md + per-brief LEARNINGS.md) replaces it cleanly.
     
     # Build diverse search queries from the brief
     task = f"""{persona}
@@ -1205,11 +1516,13 @@ You have access to Refero MCP tools. USE THEM — do not use browser screenshots
 
 ### Step 1: Run 4-5 diverse search queries
 Read the brief and create 4-5 search queries that cover DIFFERENT visual approaches:
-- Query 1: Direct match (e.g., "ranked list share card", "leaderboard social sharing")
-- Query 2: Visual technique match (e.g., "3D product showcase card", "isometric data display")
-- Query 3: Adjacent pattern (e.g., "stats comparison card dark mode", "sports ranking dashboard")
-- Query 4: Layout/composition match (e.g., "vertical list with visual hierarchy", "numbered ranking with images")
-- Query 5: Experimental/creative (e.g., "creative data visualization card", "animated infographic")
+- Query 1: Direct match — search for the exact artifact type the brief describes (e.g. if the brief is a game, search for game UIs; if it's a landing page, search for landing pages). Derive the noun from the brief, do NOT default to cards/lists/share screens.
+- Query 2: Visual technique match — search for a specific rendering, material, or motion technique the brief calls out by name.
+- Query 3: Adjacent pattern — search for a different product category that uses a similar visual language to what the brief implies.
+- Query 4: Layout/composition match — search for the spatial or structural pattern the brief implies (multi-screen flow, single-scene, scroll, grid, etc).
+- Query 5: Experimental/creative — search for an unexpected reference adjacent to the brief's tone (a film, a magazine, a museum exhibit translated into web form).
+
+IMPORTANT: do NOT use "share card", "leaderboard", "ranking", "recap card", or "infographic" as query seeds unless the brief explicitly calls for one of those artifacts. The query nouns must come from the brief, not from this prompt.
 
 For each query, use `mcp_refero_refero_search_screens` with platform="web".
 
@@ -1273,7 +1586,6 @@ Your final selection must include references from AT LEAST 3 of these visual app
 
 {('## Pipeline Wiki — Compiled Knowledge (what works, what fails, taste model)' + chr(10) + wiki_context) if wiki_context else ''}
 
-{('## Past Run Learnings (legacy)' + chr(10) + past_learnings) if past_learnings else ''}
 """
     
     result = run_hermes(f"{state['name']}-research", task, max_time=900)
@@ -1517,6 +1829,7 @@ def fan_out_designers(state: PipelineState) -> list:
     return [Send("designer", {**state, "designer_config": c}) for c in designer_configs]
 
 
+@_supervised("designer")
 def designer_node(state: dict) -> dict:
     """Phase 1: Write approach doc. One instance per parallel designer."""
     config = state["designer_config"]
@@ -1751,6 +2064,7 @@ STOP after writing the approach doc. Do NOT build anything.
     }
 
 
+@_supervised("approach_gate")
 def approach_gate_node(state: PipelineState) -> dict:
     """Phase 2: Check approaches for convergence, ambition, compliance.
     Uses MECHANICAL extraction for convergence + LLM for ambition check."""
@@ -1890,15 +2204,30 @@ ASSET_GEN_COSTS = {
 
 def extract_asset_manifest(approach_content: str) -> list:
     """Parse ASSET MANIFEST section from approach doc.
-    Returns list of dicts: {name, type, description, width, height, model_hint}"""
-    if "## ASSET MANIFEST" not in approach_content:
+    Returns list of dicts: {name, type, description, width, height, model_hint}.
+
+    Matches a flexible set of heading formats the designer persona may emit:
+    - `## ASSET MANIFEST`
+    - `## 9. ASSET MANIFEST` (numbered output sections — the persona currently
+      lists Asset Manifest as item 9 of an ordered output template)
+    - `## ASSET MANIFEST (REQUIRED)` (decorated)
+    All with optional leading whitespace and case-insensitive match.
+    """
+    import re as _re
+    # Find the heading. Allow optional numbered prefix and trailing decoration.
+    heading_re = _re.compile(
+        r"^##\s*(?:\d+\.\s*)?ASSET\s+MANIFEST.*$",
+        _re.IGNORECASE | _re.MULTILINE,
+    )
+    match = heading_re.search(approach_content)
+    if not match:
         return []
-    
-    manifest_text = approach_content.split("## ASSET MANIFEST", 1)[1]
-    # Stop at next ## heading
-    for marker in ["## BUILD CONTRACT", "## ANIMATION", "## LAYOUT", "## REQUIRED"]:
-        if marker in manifest_text:
-            manifest_text = manifest_text.split(marker, 1)[0]
+
+    manifest_text = approach_content[match.end():]
+    # Stop at the next top-level `## ` heading (any heading, not just specific ones).
+    next_heading = _re.search(r"^##\s+\S", manifest_text, _re.MULTILINE)
+    if next_heading:
+        manifest_text = manifest_text[: next_heading.start()]
     
     assets = []
     current = None
@@ -1996,6 +2325,7 @@ def generate_asset(asset: dict, fal_key: str) -> dict:
         return None
 
 
+@_supervised("asset_gen")
 def asset_gen_node(state: PipelineState) -> dict:
     """Phase 3.5: Generate visual assets from designers' asset manifests via fal.ai."""
     print(f"[ASSET GEN] Processing {len(state['approaches'])} approaches")
@@ -2262,6 +2592,7 @@ def build_direct_api(model: str, prompt: str, output_path: Path, run_name: str, 
         return {"status": "failed", "error": str(e)}
 
 
+@_supervised("builder")
 def builder_node(state: dict) -> dict:
     """Phase 3 (unified): Build HTML prototype OR continue an existing build.
 
@@ -2310,6 +2641,10 @@ def builder_node(state: dict) -> dict:
     
     # Load wiki context for builder (what scores well, anti-patterns, technique evidence)
     wiki_context = get_wiki_context(_brief_path_from_state(state), max_chars=4000)  # Shorter for builder — it's supplementary
+
+    # Option 2 (2026-05-14): format the brief scope contract for prompt injection.
+    # Empty string for static briefs — no overhead.
+    scope_contract_block = _format_scope_contract_for_builder(state.get("scope_contract"))
     
     # 4.5C: Identify moodboard images for builder reference
     moodboard_dir = run_dir / "moodboard"
@@ -2347,10 +2682,6 @@ The following moodboard images are at: {moodboard_dir}
                 asset_ref_block += f"- Description: {a.get('prompt', '')[:150]}\n"
                 asset_ref_block += f"- Use in HTML: `<img src=\"asset://{name}\" />` or `background-image: url('asset://{name}');`\n"
                 asset_ref_block += f"- The `asset://` prefix will be automatically replaced with the real image data after build.\n"
-        
-        # Bug C: emit the exact list of available asset slugs and a hard rule.
-        # The builder must not invent asset:// URLs that aren't commissioned.
-        _available_slug_list = "\n".join(f"- asset://{a['name']}" for a in asset_list) if manifest_path.exists() and asset_list else "(no assets commissioned)"
 
         assets_ref = f"""
 ## 🎨 GENERATED VISUAL ASSETS (CRITICAL — USE THESE)
@@ -2364,31 +2695,43 @@ Do NOT try to base64-encode images yourself — just use `asset://name` referenc
 
 {asset_ref_block if asset_ref_block else assets_md.read_text()}
 
-### ⚠️ ASSET-REFERENCE CONTRACT (HARD RULE — BUILD WILL BE VALIDATED)
+**MANDATORY ASSET USAGE RULES (violations = build rejection):**
 
-Your designer has commissioned EXACTLY the following asset slugs. The `asset://`
-post-processor can ONLY substitute these. Any other `asset://` URL you write
-will end up as a broken image (ERR_UNKNOWN_URL_SCHEME) in the shipped HTML.
+1. **Every commissioned asset MUST appear in your HTML at least once.** If you have 8 assets
+   commissioned, your final HTML must reference all 8 via `asset://` URLs. Skipping any
+   commissioned asset means QA fails and the build gets sent back.
 
-**Available asset slugs (use ONLY these):**
-{_available_slug_list}
+2. **Scene-level assets (shop interior, counter, dialogue UI, background plate) MUST be
+   reused on EVERY round of the experience.** For a 5-round game: the shop background appears
+   in all 5 rounds. The counter texture appears in all 5 rounds. The dialogue UI frame appears
+   in all 5 rounds. Only the FOREGROUND elements (customer sprite, shoe photo, dialogue text)
+   change per round. This is how you build a consistent world. Different scene every round =
+   chaos = rejection.
 
-**Rules:**
-1. NEVER write `asset://something-not-in-the-list-above`. Do not invent slugs.
-2. If you need an image the designer didn't commission, draw it inline with
-   CSS/SVG, OR use a styled placeholder div — NEVER write a made-up `asset://`.
-3. If a missing asset would meaningfully improve the build, add a line to a
-   sibling file `NEEDED_ASSETS.md` describing what you wanted; the human gate
-   will see it. DO NOT block the build on this.
-4. After you write the HTML, the pipeline will scan for `asset://` references
-   and any slug not in the list above is flagged as MISSING in the QA report.
+3. **Character sprites should appear in dialogue, not just intros.** If you have 5 customer
+   sprites and 5 rounds, each customer sprite shows up in their respective round during the
+   dialogue phase — not just as a one-time intro flash.
 
-**IMPORTANT:** These assets are the design foundation. Your HTML is the frame — the assets carry the
-visual weight. A build that ignores these assets and uses CSS-only visuals will be rejected.
+4. **You are NOT permitted to substitute CSS-drawn equivalents for commissioned assets.** If
+   an asset exists for it, use the asset. The fal.ai-generated image is always higher fidelity
+   than CSS you can write in this time budget.
+
+The full asset-reference contract (allowed slugs, font/external-URL rules) is emitted below as
+`## HARD ASSET CONSTRAINT` — follow it exactly.
 """
         # Collect asset images for vision input
         for ext in ["*.jpg", "*.jpeg", "*.png"]:
             asset_images_for_vision.extend(sorted(assets_dir.glob(ext))[:5])
+
+    # Bug C extension (2026-05-13): emit the same HARD ASSET CONSTRAINT that the
+    # patcher prompts use, so the INITIAL build can't introduce asset/font CORS
+    # regressions that the patcher then has to clean up. The helper handles both
+    # the "manifest exists" and "no assets commissioned" cases. We always emit
+    # this — even for concepts with no commissioned assets — because the
+    # font-CORS and external-image rules apply regardless.
+    initial_asset_constraint = _patcher_asset_constraint_block(
+        run_dir, approach["designer_id"]
+    )
     
     task = f"""{persona}
 
@@ -2421,6 +2764,12 @@ If verification fails, your build is rejected and you must redo it.
 
 ---
 
+{initial_asset_constraint}
+
+---
+
+{scope_contract_block}
+{('---' + chr(10)) if scope_contract_block else ''}
 ## ⚠️ BUILD CONTRACT (HARD REQUIREMENTS — YOUR BUILD WILL BE GREP-CHECKED)
 {build_contract}
 
@@ -2467,6 +2816,7 @@ Save to: {run_dir}/builds/{concept_name}.html
         "recipes_chars": len(recipes) if recipes else 0,
         "moodboard_ref_chars": len(moodboard_ref) if moodboard_ref else 0,
         "assets_ref_chars": len(assets_ref) if assets_ref else 0,
+        "asset_constraint_chars": len(initial_asset_constraint) if initial_asset_constraint else 0,
         "build_contract_chars": len(build_contract) if build_contract else 0,
         "wiki_chars": len(wiki_context) if wiki_context else 0,
         "design_system_chars": len(state.get("design_system", "") or ""),
@@ -2526,6 +2876,45 @@ Save to: {run_dir}/builds/{concept_name}.html
             if result.get("status") != "done":
                 gen.set_error(f"hermes status: {result.get('status')}")
     
+    # Bug fix (v7, 2026-05-14): capture which asset:// refs the builder
+    # actually wrote BEFORE we substitute them to base64 data URIs. The old
+    # flow did substitution first and validation second, which meant
+    # `matched` was ALWAYS empty (every asset:// had already been replaced),
+    # `extra_in_manifest` was ALWAYS the full manifest, and the downstream
+    # asset-utilization QA check saw 0/N usage on every well-behaved build —
+    # spawning an infinite "Asset under-utilization" qa_fix loop that the
+    # patcher could never satisfy (because its own patches also went through
+    # the same substitute-then-validate flow).
+    #
+    # New order:
+    #   1. Validate against the manifest BEFORE substitution → real `matched`
+    #      and `missing` based on what the builder actually wrote.
+    #   2. Substitute matched asset:// refs to base64.
+    #   3. Re-validate AFTER substitution only to surface any hallucinated
+    #      slugs that survived (these become SVG fallbacks). The pre-sub
+    #      `matched` set is preserved on the build record so QA can compute
+    #      a real utilization ratio.
+    asset_validation = {"matched": [], "missing": [], "extra_in_manifest": []}
+    manifest_path = assets_dir / "manifest.json" if assets_dir.exists() else None
+    if build_path.exists() and manifest_path and manifest_path.exists():
+        try:
+            asset_validation = validate_asset_references(build_path, manifest_path)
+            print(
+                f"  [asset-validate/pre-sub] concept-{idx}: matched={len(asset_validation.get('matched', []))} "
+                f"missing={len(asset_validation.get('missing', []))} "
+                f"unused_in_manifest={len(asset_validation.get('extra_in_manifest', []))}"
+            )
+            # Persist sidecar so qa_loop can read this on every iteration
+            # without depending on the (frozen) build dict's asset_validation.
+            try:
+                sidecar = run_dir / "builds" / f"concept-{idx}-asset-validation.json"
+                sidecar.parent.mkdir(parents=True, exist_ok=True)
+                sidecar.write_text(json.dumps(asset_validation, indent=2, default=str))
+            except Exception:
+                pass
+        except Exception as e:
+            print(f"  [asset-validate/pre-sub] failed (non-fatal): {e}")
+
     # Post-process: replace asset:// references with base64 data URIs
     if build_path.exists() and assets_dir.exists():
         import base64 as b64mod
@@ -2552,15 +2941,18 @@ Save to: {run_dir}/builds/{concept_name}.html
                 build_path.write_text(html_content)
                 print(f"  [asset-inject] Replaced {replacements} asset:// references with base64 data URIs ({len(html_content)//1024}KB)")
 
-    # Bug C: validate any remaining asset:// references against the manifest.
-    # After base64 substitution, any surviving asset:// URL is a hallucinated
-    # reference (builder invented a slug). Surface in QA + fall back to SVG
-    # placeholders so the build doesn't ship with ERR_UNKNOWN_URL_SCHEME.
-    asset_validation = {"matched": [], "missing": [], "extra_in_manifest": []}
+    # Bug C: surface any asset:// refs the builder INVENTED (slugs not in the
+    # manifest). We only need the `missing` list here — `matched` and
+    # `extra_in_manifest` were already captured above before substitution.
     if build_path.exists() and assets_dir.exists():
         manifest_path = assets_dir / "manifest.json"
         if manifest_path.exists():
-            asset_validation = validate_asset_references(build_path, manifest_path)
+            post_sub_validation = validate_asset_references(build_path, manifest_path)
+            # Preserve pre-substitution `matched` + `extra_in_manifest` so the
+            # QA utilization check can see what the builder ACTUALLY used.
+            # Only refresh `missing` from the post-substitution scan since
+            # legitimate refs are gone by now and what's left is hallucinated.
+            asset_validation["missing"] = post_sub_validation.get("missing", [])
             missing = asset_validation.get("missing", [])
             if missing:
                 print(f"  ⚠️  Builder {idx}: {len(missing)} unresolved asset:// refs (builder invented these):")
@@ -3954,10 +4346,76 @@ def _playability_gap_summary(signals: dict, requirements: dict) -> str:
     return " ".join(gaps)
 
 
+def _patcher_asset_constraint_block(run_dir: Path, concept_index: int) -> str:
+    """Build a 'hard constraint' block listing the asset:// slugs this concept's
+    output is ALLOWED to reference. Prevents builders/patchers from inventing
+    image paths (which become ERR_FILE_NOT_FOUND in the browser) or external
+    font URLs (which CORS-fail from file://) and feed the regression loop.
+    Used at BOTH the initial-build site (builder_node) AND the patcher sites
+    (qa_fix, judge_polish). Language is intentionally neutral ("your output")
+    so it reads correctly in both contexts. If the manifest is missing, falls
+    back to a generic 'no external images' rule.
+    """
+    manifest_path = run_dir / "assets" / f"concept-{concept_index}" / "manifest.json"
+    available = []
+    if manifest_path.exists():
+        try:
+            manifest = json.loads(manifest_path.read_text())
+            available = [a.get("name") for a in manifest if a.get("name")]
+        except Exception:
+            available = []
+
+    if available:
+        slug_list = "\n".join(f"- asset://{n}" for n in available)
+        constraint = (
+            "## HARD ASSET CONSTRAINT (CRITICAL — violations = broken build)\n"
+            "Your output may reference images ONLY via the `asset://` prefix and ONLY\n"
+            "using the slugs in the list below. The post-processor will substitute\n"
+            "these with base64 data URIs after your output is written.\n\n"
+            f"Available slugs for THIS concept (concept-{concept_index}):\n{slug_list}\n\n"
+            "Strict rules:\n"
+            "1. NEVER write `<img src=\"some-file.jpg\">`, `<img src=\"/assets/foo.png\">`,\n"
+            "   or ANY relative/absolute file path. The build runs from file:// — those\n"
+            "   paths become ERR_FILE_NOT_FOUND in the browser and break the experience.\n"
+            "2. NEVER invent `asset://made-up-slug`. Only the exact slugs above resolve.\n"
+            "   Any other `asset://` slug becomes a broken image in the shipped HTML.\n"
+            "3. NEVER reference external image URLs (https://images.unsplash.com,\n"
+            "   placeholder.com, picsum, imgur, any CDN, etc.) — CORS will block them\n"
+            "   when running from file:// origin.\n"
+            "4. For NEW imagery you need but isn't in the slug list: draw it with inline\n"
+            "   SVG, CSS gradients, emoji, or styled <div> placeholders. Do not block\n"
+            "   on missing assets — improvise inline.\n"
+            "5. Fonts: use system fonts (system-ui, -apple-system, Inter, etc.) or\n"
+            "   Google Fonts via https://fonts.googleapis.com (which works from file://).\n"
+            "   NEVER reference custom .woff/.woff2 URLs from arbitrary domains\n"
+            "   (departuremono.com, your-cdn.com, etc.) — the browser BLOCKS cross-origin\n"
+            "   font fetches from file:// origin and your custom font silently fails.\n"
+            "   If you want a display font not on Google Fonts, fall back to a Google\n"
+            "   Fonts approximation (e.g. Space Mono / JetBrains Mono instead of\n"
+            "   Departure Mono) — never load it from a third-party CDN.\n"
+        )
+    else:
+        constraint = (
+            "## HARD ASSET CONSTRAINT (CRITICAL — violations = broken build)\n"
+            "No image assets are commissioned for this concept. Your output must draw\n"
+            "all imagery with inline SVG, CSS gradients, emoji, or styled <div>\n"
+            "placeholders. NEVER reference external image URLs (unsplash, picsum,\n"
+            "placeholder.com, any CDN) or relative/absolute file paths — those become\n"
+            "ERR_FILE_NOT_FOUND or CORS failures when the build runs from file://.\n"
+            "\n"
+            "Fonts: use system fonts or Google Fonts via https://fonts.googleapis.com\n"
+            "ONLY. NEVER reference custom .woff/.woff2 URLs from arbitrary domains —\n"
+            "the browser BLOCKS cross-origin font fetches from file:// origin.\n"
+        )
+    return constraint
+
+
 def _playability_build_patch_prompt(brief_text: str, signals: dict, requirements: dict,
                                     concept_index: int, code_context: str,
                                     iteration: int, max_iter: int,
-                                    approach_doc: str = "") -> tuple[str, str]:
+                                    approach_doc: str = "",
+                                    asset_constraint: str = "",
+                                    qa_issues: list = None) -> tuple[str, str]:
     """Build the playability-continuation prompt anchored to the ORIGINAL approach doc.
 
     The approach doc is the creative anchor that keeps each concept's voice intact
@@ -3995,9 +4453,47 @@ def _playability_build_patch_prompt(brief_text: str, signals: dict, requirements
         + ("\n- The performance reveal screen MUST contain the text 'TOTAL PROFIT' or 'P&L' or 'PERFORMANCE' or 'RESULTS' so it's detectable." if need_perf else "")
         + ("\n- The share card screen MUST contain a 'Share' or 'Copy Link' or 'Share Result' button." if need_share else "")
         + "\n\nStay true to your approach doc. The patcher is free to refactor broken state machines or add missing screens — what it shouldn't do is redesign in a generic style. The approach doc is your creative anchor; trust it."
+        # Option 2 (2026-05-14): visual-fidelity polish mandate for multi-step
+        # briefs once structure is in. Iteration 2+ explicitly asks the patcher
+        # to LIFT visual quality of any rounds it adds to match the original
+        # build's hero round. Iteration 1 stays focused on structural completion.
+        + (
+            "\n\n## VISUAL FIDELITY POLISH (this is iteration " + str(iteration) + " — the structure is now in place)"
+            "\nAny rounds/screens you added in earlier iterations probably feel less polished than the ORIGINAL round 1 in this build."
+            " Round 1 represents the visual ceiling — the lighting, character detail, dialogue richness, and chrome you committed to in the initial pass."
+            " Your job this iteration:"
+            "\n  1. Identify round 1's visual treatment (pixel-art detail level, dialogue style, shoe presentation, lighting, typography)."
+            "\n  2. Lift rounds 2-N to that SAME quality bar. Match the character detail. Match the dialogue voice and length. Match the texture treatment."
+            "\n  3. Do NOT regress round 1. Do NOT change the visual system. Only polish the rounds that feel under-built."
+            "\n  4. If round 1 has rich pixel-art shop scenery, your other rounds need the same. If it has dialogue with personality, your other rounds need that too."
+            "\nThe goal is rounds 2-N looking like the original builder designed them with the same care as round 1, not like a patcher hastily filled them in."
+            if requirements.get("is_multistep") and iteration >= 2 else ""
+        )
     )
 
     approach_block = (approach_doc[:8000] if approach_doc else "(approach doc unavailable — stay true to the existing code's style)")
+
+    qa_block = ""
+    if qa_issues:
+        bullets = "\n".join(f"- {iss}" for iss in qa_issues[:15])
+        qa_block = (
+            "\n## 🚨 QA REPORT — BLOCKING ISSUES (FIX THESE FIRST)\n\n"
+            "The automated QA station flagged the following blocking issues on the current build. "
+            "These are NOT optional. You MUST address every one before adding any new game logic. "
+            "If you keep adding gameplay while ignoring these flags, the next QA iteration will "
+            "re-flag the same items and we'll be stuck in a doom loop (this happened in v5).\n\n"
+            f"{bullets}\n\n"
+            "Common fixes for these patterns:\n"
+            "- 'broken image refs' / 'ERR_FILE_NOT_FOUND' → the build references images that don't "
+            "exist. Either remove those <img> tags entirely, replace with inline SVG, or substitute "
+            "a commissioned `asset://<slug>` (see HARD ASSET CONSTRAINT above).\n"
+            "- 'mobile viewport overflow' → the page content is taller than 844px on mobile. Add "
+            "`overflow: hidden` on the root, use `transform: scale()` with `transform-origin: top left`, "
+            "or restructure layout so the artifact fits 1080×1920 with mobile zoom.\n"
+            "- 'console errors' → inspect the specific error string above. ERR_FILE_NOT_FOUND → remove "
+            "the failing src. CORS → don't load external fonts/scripts.\n\n"
+            "Resolve EVERY QA flag in your patch. Then — if you have headroom — add game logic.\n"
+        )
 
     user = f"""## YOUR ORIGINAL APPROACH DOC (concept-{concept_index}) — creative anchor
 {approach_block}
@@ -4005,6 +4501,8 @@ def _playability_build_patch_prompt(brief_text: str, signals: dict, requirements
 ## BRIEF CONTEXT
 {brief_text[:4000]}
 
+{asset_constraint}
+{qa_block}
 ## ITERATION {iteration}/{max_iter}
 
 ## DIAGNOSIS FROM AUTOMATED WALKER (what's still missing/broken)
@@ -4021,7 +4519,7 @@ Telemetry:
 {code_context}
 
 ## YOUR TASK
-Write a single <script> block that completes the unbuilt portions of this experience in your original creative voice. Focus on closing the gaps identified above. Stay true to your approach doc — same palette, same mechanics, same tone. The end goal is a user can click through {completion_sentence}.
+Write a single <script> block that completes the unbuilt portions of this experience in your original creative voice. Focus on closing the gaps identified above. Stay true to your approach doc — same palette, same mechanics, same tone. The end goal is a user can click through {completion_sentence}. Obey the HARD ASSET CONSTRAINT above — broken image refs cause the next iteration to spend its budget fixing your hallucinations instead of improving the build.
 """
     return system, user
 
@@ -4042,6 +4540,139 @@ def _playability_apply_patch(html: str, patch_text: str) -> str:
     if "</body>" in html:
         return html.replace("</body>", f"{marker}{patch}\n</body>", 1)
     return html + f"{marker}{patch}\n"
+
+
+def _post_patch_asset_hygiene(
+    build_path: Path,
+    run_dir: Path,
+    concept_idx: int,
+    phase_label: str = "patch",
+) -> dict:
+    """After a qa_fix / judge_polish / playability patch writes new HTML,
+    run the same asset hygiene that the initial builder ran:
+
+    1. Resolve any fresh `asset://<slug>` references against the concept's
+       generated asset manifest, replacing with base64 data URIs.
+    2. Validate any surviving `asset://` references against the manifest.
+    3. For hallucinated refs (slugs that aren't in the manifest), substitute
+       SVG placeholders so the build doesn't ship with ERR_UNKNOWN_URL_SCHEME
+       or load-failure errors that the next iteration would then try to fix.
+    4. Append hallucinated refs to NEEDED_ASSETS.md.
+
+    Without this step, every patch can introduce new broken asset refs, which
+    become the next iteration's "console errors" to fix — a regression loop.
+
+    Returns a small dict with telemetry: {resolved, hallucinated, fallbacks_applied}.
+    """
+    result = {
+        "resolved": 0,
+        "hallucinated": 0,
+        "fallbacks_applied": 0,
+        # New (v7, 2026-05-14): pre-substitution validation so callers can
+        # update the build's asset_validation with the patcher's REAL usage.
+        "asset_validation": None,
+    }
+    try:
+        if not build_path.exists():
+            return result
+        assets_dir = run_dir / "assets" / f"concept-{concept_idx}"
+        manifest_path = assets_dir / "manifest.json"
+        if not manifest_path.exists():
+            return result
+
+        # Pre-substitution validation: capture which asset:// refs are in the
+        # patched HTML BEFORE we resolve them to data URIs. This is the only
+        # way to know what the patcher actually used (asset_validation can
+        # then drive an accurate utilization check downstream).
+        try:
+            pre_sub_validation = validate_asset_references(build_path, manifest_path)
+            result["asset_validation"] = pre_sub_validation
+            # Write a sidecar so the QA loop can read the patcher's REAL
+            # asset usage on the next iteration. The `builds` state field is
+            # `Annotated[list, add]` (append-only) so we can't mutate the
+            # build dict in-place from inside the patcher — the sidecar is
+            # the most reliable way to keep utilization metrics fresh
+            # across the qa_loop ↔ builder ping-pong.
+            try:
+                sidecar = run_dir / "builds" / f"concept-{concept_idx}-asset-validation.json"
+                sidecar.parent.mkdir(parents=True, exist_ok=True)
+                sidecar.write_text(json.dumps(pre_sub_validation, indent=2, default=str))
+            except Exception:
+                pass
+        except Exception:
+            pre_sub_validation = None
+
+        # Step 1: resolve fresh asset:// refs to base64 from the manifest.
+        import base64 as _b64
+        try:
+            manifest = json.loads(manifest_path.read_text())
+        except Exception:
+            manifest = []
+        html_content = build_path.read_text(errors="ignore")
+        replacements = 0
+        for asset in manifest:
+            name = asset.get("name")
+            local_path = asset.get("local_path")
+            if not name or not local_path:
+                continue
+            lp = Path(local_path)
+            if not lp.exists():
+                continue
+            ext = lp.suffix.lower().lstrip(".")
+            mime = {"jpg": "image/jpeg", "jpeg": "image/jpeg", "png": "image/png", "webp": "image/webp"}.get(ext, "image/jpeg")
+            try:
+                with open(lp, "rb") as f:
+                    encoded = _b64.standard_b64encode(f.read()).decode("utf-8")
+            except Exception:
+                continue
+            data_uri = f"data:{mime};base64,{encoded}"
+            for pattern in [f"asset://{name}", f"asset://{name}.jpg", f"asset://{name}.jpeg", f"asset://{name}.png"]:
+                if pattern in html_content:
+                    html_content = html_content.replace(pattern, data_uri)
+                    replacements += 1
+        if replacements > 0:
+            build_path.write_text(html_content)
+            print(f"  [{phase_label}/asset-inject] resolved {replacements} fresh asset:// ref(s) to base64")
+        result["resolved"] = replacements
+
+        # Step 2 + 3: validate remaining refs and apply SVG fallbacks. After
+        # substitution, any surviving asset:// ref is hallucinated.
+        try:
+            validation = validate_asset_references(build_path, manifest_path)
+        except Exception as e:
+            print(f"  [{phase_label}/asset-validate] failed (non-fatal): {e}")
+            return result
+        # Refresh `missing` on the pre-sub validation from the post-sub scan;
+        # legitimate refs have been replaced by now so anything left is junk.
+        if pre_sub_validation is not None:
+            pre_sub_validation["missing"] = validation.get("missing", [])
+        missing = validation.get("missing") or []
+        if missing:
+            result["hallucinated"] = len(missing)
+            print(f"  [{phase_label}/asset-validate] ⚠️ {len(missing)} hallucinated asset:// ref(s) after patch:")
+            for m in missing[:8]:
+                print(f"     ✗ asset://{m}")
+            try:
+                substituted = apply_missing_asset_fallbacks(build_path, missing)
+                result["fallbacks_applied"] = substituted or 0
+                if substituted:
+                    print(f"  [{phase_label}/asset-fallback] substituted {substituted} broken ref(s) with SVG placeholders")
+            except Exception as e:
+                print(f"  [{phase_label}/asset-fallback] failed (non-fatal): {e}")
+            # Append to NEEDED_ASSETS.md for human-gate visibility.
+            try:
+                needed_path = run_dir / "builds" / f"concept-{concept_idx}-NEEDED_ASSETS.md"
+                lines = [f"## {phase_label} @ {time.strftime('%Y-%m-%d %H:%M:%S')}"]
+                for m in missing:
+                    lines.append(f"- `asset://{m}`")
+                lines.append("")
+                with open(needed_path, "a") as f:
+                    f.write("\n".join(lines))
+            except Exception:
+                pass
+    except Exception as e:
+        print(f"  [{phase_label}/asset-hygiene] outer error (non-fatal): {e}")
+    return result
 
 
 def _sync_eval_builds(run_dir: Path, indices: list) -> None:
@@ -4112,22 +4743,48 @@ def _call_playability_patch_model(model: str, system: str, user: str,
     usage = {"input": 0, "output": 0}
 
     if resolved.startswith("claude"):
-        # Streaming Anthropic call — same pattern as the legacy loop.
-        parts = []
-        with anthropic_client.messages.stream(
-            model=resolved,
-            max_tokens=max_tokens,
-            system=system,
-            messages=[{"role": "user", "content": user}],
-        ) as stream:
-            for chunk in stream.text_stream:
-                parts.append(chunk)
-            final_resp = stream.get_final_message()
-        patch_text = "".join(parts)
-        if getattr(final_resp, "usage", None):
-            usage["input"] = getattr(final_resp.usage, "input_tokens", 0) or 0
-            usage["output"] = getattr(final_resp.usage, "output_tokens", 0) or 0
+        # Route through Hermes (Option C, ratified 2026-05-15): all Claude/
+        # Anthropic creative work must go via run_hermes(). Direct Anthropic
+        # API in pipeline.py is reserved for short structured nodes only
+        # (scope_contract, approach_gate, judge).
+        job_id = f"playability-patch-{uuid.uuid4().hex[:12]}"
+        output_path = Path(f"/tmp/hermes-jobs/{job_id}/patch.html")
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+
+        task = (
+            f"You are running a playability-patch task for the creative pipeline.\n\n"
+            f"=== SYSTEM ===\n{system}\n\n"
+            f"=== USER ===\n{user}\n\n"
+            f"=== INSTRUCTIONS ===\n"
+            f"Write ONLY the patch HTML (no commentary, no markdown fences) to "
+            f"`{output_path}` using the Write tool. Do not modify any other files. "
+            f"Target length budget: roughly {max_tokens} tokens of output. "
+            f"When the file is written, your task is complete.\n"
+        )
+
+        result = run_hermes(job_id, task, max_time=600, max_turns=20)
+        if result.get("status") != "done":
+            raise RuntimeError(f"hermes playability patch failed: status={result.get('status')} job_id={job_id}")
+        if not output_path.exists():
+            raise RuntimeError("hermes did not produce patch file")
+        patch_text = output_path.read_text()
+        if not patch_text.strip():
+            raise RuntimeError("hermes did not produce patch file")
+
+        # Strip accidental markdown fences (mirror qa-fix logic)
+        if "```html" in patch_text:
+            patch_text = patch_text.split("```html", 1)[1].split("```", 1)[0]
+        elif patch_text.lstrip().startswith("```"):
+            stripped = patch_text.lstrip()
+            patch_text = stripped[3:].split("```", 1)[0]
+
+        # Hermes doesn't surface usage — estimate.
+        usage["input"] = estimate_tokens(system + "\n" + user)
+        usage["output"] = estimate_tokens(patch_text)
         track_cost(resolved, usage["input"], usage["output"], "playability")
+        gen.set_usage(input_tokens=usage["input"], output_tokens=usage["output"], estimated=True)
+        gen.set_output(patch_text)
+        return patch_text, usage
     elif resolved.startswith("gpt"):
         # Combine system + user since OpenAI chat lacks a separate "system"
         # parameter idiom in this codebase's existing usage pattern.
@@ -4308,9 +4965,15 @@ def _builder_playability_run(state: dict) -> dict:
             # 2. Build the patch prompt anchored to the original approach doc.
             html = build_path.read_text(errors="ignore")
             code_ctx = _playability_extract_code_chunks(html, max_chars=PLAYABILITY_CODE_MAX_CHARS)
+            asset_constraint = _patcher_asset_constraint_block(
+                RUNS_DIR / state["name"], idx
+            )
+            qa_issues = state.get("qa_report_issues") or []
             system, user = _playability_build_patch_prompt(
                 brief_text, signals, requirements, idx, code_ctx, it, max_iter,
                 approach_doc=approach_doc,
+                asset_constraint=asset_constraint,
+                qa_issues=qa_issues,
             )
 
             with tracer.generation(
@@ -4356,6 +5019,18 @@ def _builder_playability_run(state: dict) -> dict:
             except Exception:
                 backup = None
             build_path.write_text(patched)
+            # CRITICAL: run asset hygiene immediately after writing the patch.
+            # Without this, any fresh `asset://` ref the patcher invented
+            # ships as a broken URL (ERR_UNKNOWN_URL_SCHEME / 404 / blank
+            # image), which the next QA iteration then treats as a new
+            # "console error" to fix — a regression loop that consumed v3.
+            try:
+                _post_patch_asset_hygiene(
+                    build_path, RUNS_DIR / state["name"], idx, phase_label="playability"
+                )
+            except Exception as e:
+                print(f"     ⚠️ post-patch asset hygiene failed (non-fatal): {e}")
+
             patch_entries.append({
                 "iter": it,
                 "bytes": len(patch_text),
@@ -4429,13 +5104,14 @@ def _builder_playability_run(state: dict) -> dict:
 def _builder_qa_fix_run(state: dict) -> dict:
     """QA-fix mode — one patch iteration driven by the QA loop.
 
-    Reuses `_builder_playability_run` as the patch driver (walker + DOM
-    signals + approach-doc-anchored prompt) because the qa_fix scope is a
-    superset of the playability scope: same surgical-patch model, same
-    per-concept-model routing, just with broader trigger criteria. On top of
-    the playability return shape, we also bump `qa_iterations` for this
-    concept and set `builder_mode="qa_fix"` so the router sends us back to
-    qa_loop for re-validation.
+    Reuses `_builder_playability_run` as the patch driver but FIRST injects
+    the latest QA report's issues into the patcher's input via state. The
+    inner playability prompt builder reads `state['qa_report_issues']` and
+    surfaces them at the TOP of the patch task so the patcher addresses
+    QA-flagged blockers (broken images, viewport overflow, console errors)
+    BEFORE trying to add more game logic. Without this, the patcher kept
+    'completing' walker checks while ignoring the same QA flags every iter
+    — v5's doom loop.
 
     NOTE: The QA loop itself drives the OUTER iteration counter (one
     `_builder_qa_fix_run` invocation = ONE patch attempt). This wrapper sets
@@ -4443,13 +5119,18 @@ def _builder_qa_fix_run(state: dict) -> dict:
     internal budget on top of the outer loop's budget.
     """
     idx = state.get("build_index")
+    # Extract THIS concept's QA report issues to thread into the patcher.
+    qa_reports = state.get("qa_reports_by_concept", {}) or {}
+    this_report = qa_reports.get(idx, {}) or {}
+    qa_issues = this_report.get("issues", []) or []
     # Force the playability driver to do exactly one patch per outer-loop visit.
-    inner_state = {**state, "playability_max_iter": 1}
+    inner_state = {
+        **state,
+        "playability_max_iter": 1,
+        "qa_report_issues": qa_issues,  # picked up by _playability_build_patch_prompt
+    }
     out = _builder_playability_run(inner_state)
     out["builder_mode"] = "qa_fix"
-    # Bump per-concept qa_iterations by 1 — the _merge_dict reducer ADDS this to
-    # whatever the previous value was (well, REPLACES — so we have to read it
-    # from state and emit current+1).
     prev_iters = (state.get("qa_iterations", {}) or {}).get(idx, 0)
     out["qa_iterations"] = {idx: prev_iters + 1}
     return out
@@ -4458,7 +5139,8 @@ def _builder_qa_fix_run(state: dict) -> dict:
 def _judge_polish_build_patch_prompt(brief_text: str, score_json: dict,
                                        approach_doc: str, code_context: str,
                                        iteration: int, max_iter: int,
-                                       concept_index: int) -> tuple[str, str]:
+                                       concept_index: int,
+                                       asset_constraint: str = "") -> tuple[str, str]:
     """Build the judge-polish patch prompt.
 
     Anchored to the ORIGINAL approach doc (per-concept-model voice) and driven
@@ -4507,6 +5189,8 @@ def _judge_polish_build_patch_prompt(brief_text: str, score_json: dict,
 
 ## BRIEF CONTEXT
 {brief_text[:3000]}
+
+{asset_constraint}
 
 ## ITERATION {iteration}/{max_iter}
 
@@ -4592,6 +5276,9 @@ def _builder_judge_polish_run(state: dict) -> dict:
     try:
         html = build_path.read_text(errors="ignore")
         code_ctx = _playability_extract_code_chunks(html, max_chars=PLAYABILITY_CODE_MAX_CHARS)
+        asset_constraint = _patcher_asset_constraint_block(
+            RUNS_DIR / state["name"], idx
+        )
         system, user = _judge_polish_build_patch_prompt(
             brief_text=state.get("brief", "") or "",
             score_json=score,
@@ -4600,6 +5287,7 @@ def _builder_judge_polish_run(state: dict) -> dict:
             iteration=iter_now,
             max_iter=max_iter,
             concept_index=idx,
+            asset_constraint=asset_constraint,
         )
 
         with tracer.generation(
@@ -4631,10 +5319,18 @@ def _builder_judge_polish_run(state: dict) -> dict:
         except Exception:
             backup = None
         build_path.write_text(patched)
+        # CRITICAL: run asset hygiene immediately after writing the patch.
+        # See playability path for full rationale.
+        run_dir = RUNS_DIR / state["name"]
+        try:
+            _post_patch_asset_hygiene(
+                build_path, run_dir, idx, phase_label="judge-polish"
+            )
+        except Exception as e:
+            print(f"     ⚠️ post-patch asset hygiene failed (non-fatal): {e}")
         print(f"     ✅ judge-polish patch applied (size {len(patched)//1024}KB)")
 
         # Sync the eval app build for this concept.
-        run_dir = RUNS_DIR / state["name"]
         try:
             _sync_eval_builds(run_dir, [idx])
         except Exception as e:
@@ -4808,8 +5504,51 @@ def _run_qa_checks_for_build(build: dict, state: PipelineState,
         "width_ref": has_width, "height_ref": has_height, "pass": has_width and has_height,
     }
 
+    # Prefer the per-concept sidecar written by the builder / patch hygiene.
+    # The build dict's `asset_validation` field is frozen at initial-build
+    # time (the `builds` reducer is append-only, so patches can't mutate it),
+    # while the sidecar is rewritten on EVERY patch hygiene pass and
+    # therefore reflects the patcher's CURRENT asset usage. Without this,
+    # the utilization check sees a stale snapshot and can fire forever even
+    # after the patcher integrates the assets. (Asset-utilization doom loop,
+    # v7, 2026-05-14.)
+    run_dir_qa = RUNS_DIR / state["name"]
+    sidecar = run_dir_qa / "builds" / f"concept-{idx}-asset-validation.json"
+    asset_val: dict = {}
+    if sidecar.exists():
+        try:
+            asset_val = json.loads(sidecar.read_text())
+        except Exception:
+            asset_val = {}
+    if not asset_val:
+        asset_val = build.get("asset_validation", {}) or {}
+
     report["source_checks"]["spec_compliance"] = build.get("compliance", {})
-    report["source_checks"]["asset_validation"] = build.get("asset_validation", {})
+    report["source_checks"]["asset_validation"] = asset_val
+
+    # Asset utilization check: builders must use the commissioned assets, not
+    # just reference a token few. If >20% of assets sit unused, flag for the
+    # patcher to integrate them. (Was previously only logged as 'wasted spend'.)
+    matched = asset_val.get("matched") or []
+    extra = asset_val.get("extra_in_manifest") or []
+    total_commissioned = len(matched) + len(extra)
+    if total_commissioned >= 3 and len(extra) > 0:
+        utilization = len(matched) / total_commissioned
+        report["source_checks"]["asset_utilization"] = {
+            "used": len(matched),
+            "unused": len(extra),
+            "total": total_commissioned,
+            "ratio": utilization,
+            "unused_slugs": extra,
+            "pass": utilization >= 0.80,
+        }
+        if utilization < 0.80:
+            unused_preview = ", ".join(extra[:5]) + (", ..." if len(extra) > 5 else "")
+            report["issues"].append(
+                f"Asset under-utilization: only {len(matched)}/{total_commissioned} commissioned "
+                f"assets used ({utilization*100:.0f}%). Unused assets: {unused_preview}. The patcher "
+                f"must integrate these assets into the build — reference them via asset://<slug>."
+            )
 
     if state.get("design_system"):
         ds_result = check_design_system_compliance(build_path, state["design_system"])
@@ -5037,6 +5776,35 @@ def qa_loop_node(state: PipelineState) -> dict:
         # Make sure the build dict carries its current fix-attempt count for the helper.
         b["qa_fix_attempts"] = prev_iters.get(idx, 0)
         report = _run_qa_checks_for_build(b, state, qa_dir, screenshot_dir, walks_dir)
+
+        # Same-flag-twice guard (v7, 2026-05-14): if the current QA report's
+        # issue signature is identical to the previous iteration's, the
+        # patcher has failed to fix it twice in a row. Demote those
+        # identical issues to warnings so we don't doom-loop. (The asset
+        # under-utilization bug shipped v7 into a 25-superstep recursion
+        # crash for exactly this reason — the same fixable flag fired every
+        # iter and the patcher couldn't satisfy it.) We keep the QA report
+        # honest by recording the demoted set under `stuck_issues`.
+        prev_report = (state.get("qa_reports_by_concept", {}) or {}).get(idx) or {}
+        prev_issue_set = set(prev_report.get("issues") or [])
+        current_issue_set = set(report.get("issues") or [])
+        repeated = prev_issue_set & current_issue_set
+        if repeated and prev_iters.get(idx, 0) >= 1:
+            report["stuck_issues"] = sorted(repeated)
+            remaining = [iss for iss in (report.get("issues") or []) if iss not in repeated]
+            if remaining:
+                # Some issues still actionable — keep iterating on those.
+                report["issues"] = remaining
+                if not [i for i in remaining if "BROKEN" in i or "blank" in i.lower() or "missing/empty" in i.lower()]:
+                    report["verdict"] = "FIXABLE"
+            else:
+                # Every remaining flag has already failed to be patched
+                # twice. Promote to PASS-with-warnings so the run advances.
+                report["issues"] = []
+                report["verdict"] = "PASS"
+                print(f"  ⚖️  concept-{idx}: same {len(repeated)} issue(s) flagged for 2+ iters — "
+                      f"promoting to PASS-with-warnings (stuck: {list(repeated)[:2]})")
+
         new_reports[idx] = report
         legacy_reports.append(report)
 
@@ -5540,6 +6308,374 @@ def route_after_judge_loop(state: PipelineState):
     return "pairwise_rank"
 
 
+# ──────────────────────────────────────────────────────────────────────────
+# Unified Polish Loop (2026-05-15) — Option A higher-order factory
+# Behind --use-unified-polish-loop flag. Legacy qa_loop_node / judge_loop_node
+# remain in place; this provides the same node semantics through a single
+# parameterized body so we can land it dark and validate before flipping the
+# default in a separate session.
+# ──────────────────────────────────────────────────────────────────────────
+
+# Loop-type-specific configuration. Single source of truth so adding a third
+# polish loop later only touches this table.
+_POLISH_LOOP_CONFIG = {
+    "qa": {
+        "pending_status": "pending",
+        "pass_status": "pass",
+        "builder_mode": "qa_fix",
+        "next_node": "judge_loop",
+        "max_iter_default_name": "MAX_QA_ITERATIONS",
+        "label": "QA-LOOP",
+    },
+    "judge": {
+        "pending_status": "pending_polish",
+        "pass_status": "above_bar",
+        "builder_mode": "judge_polish",
+        "next_node": "pairwise_rank",
+        "max_iter_default_name": "MAX_JUDGE_ITERATIONS",
+        "label": "JUDGE-LOOP",
+    },
+}
+
+
+def _run_polish_for_build(b: dict, state: PipelineState, loop_type: str,
+                          run_dir: Path, **kwargs) -> tuple:
+    """Dispatch wrapper returning a uniform (report_dict, passes, reason) tuple.
+
+    For loop_type="qa":
+        Calls _run_qa_checks_for_build and applies the same pass criterion the
+        legacy qa_loop_node used (verdict == "PASS", no blocking issues).
+        Returns (qa_report, passes_bool, reason_string).
+    For loop_type="judge":
+        Calls _judge_score_one_build then _score_meets_threshold.
+        Returns (scores_json, passes_bool, reason_string).
+
+    Note: the same-flag-twice demotion logic for qa lives in polish_loop_node
+    (it needs access to the prior report from state), not in this helper.
+    """
+    if loop_type == "qa":
+        qa_dir = run_dir / "qa-reports"
+        screenshot_dir = run_dir / "screenshots"
+        walks_dir = run_dir / "walks"
+        report = _run_qa_checks_for_build(b, state, qa_dir, screenshot_dir, walks_dir)
+        verdict = report.get("verdict", "BROKEN")
+        passes = (verdict == "PASS")
+        reason = f"verdict={verdict}"
+        return report, passes, reason
+
+    if loop_type == "judge":
+        score_dir = run_dir / "judge-scores"
+        walks_dir = run_dir / "walks"
+        threshold = kwargs["threshold"]
+        judge_model = kwargs["judge_model"]
+        judge_max_tokens = kwargs["judge_max_tokens"]
+        judge_system = kwargs["judge_system"]
+        siblings = kwargs.get("other_approach_summaries", "")
+        scores_json = _judge_score_one_build(
+            b, state, score_dir, walks_dir,
+            judge_model, judge_max_tokens, judge_system,
+            other_approach_summaries=siblings,
+        )
+        passes, reason = _score_meets_threshold(scores_json, threshold)
+        return scores_json, passes, reason
+
+    raise ValueError(f"unknown loop_type: {loop_type!r}")
+
+
+def polish_loop_node(state: PipelineState, loop_type: str) -> dict:
+    """Unified per-concept polish loop. Configurable via loop_type ("qa" | "judge").
+
+    Reads:
+      state["polish_iterations"][loop_type] : Dict[int, int]
+      state["polish_status"][loop_type]     : Dict[int, str]
+      state["polish_reports"][loop_type]    : Dict[int, dict]
+      state["polish_max_iter"][loop_type]   : Optional[int]
+      state["polish_threshold"][loop_type]  : Optional[dict]  (judge only)
+
+    Writes back the SAME nested structure (one outer key, loop_type).
+
+    Preserves all behaviors of the two legacy nodes:
+      - per-concept-model identity in the Send (handled by the factory's fan_out)
+      - same-flag-twice demotion guard (qa only)
+      - qa-status-blocks-judge precedence (judge only)
+      - cost-circuit short-circuit
+    """
+    cfg = _POLISH_LOOP_CONFIG[loop_type]
+    pending_status = cfg["pending_status"]
+    pass_status = cfg["pass_status"]
+
+    # Pass 1 supervision: phase enter (with loop_type payload).
+    _polish_phase = f"polish_loop_{loop_type}"
+    _polish_t0 = time.time()
+    try:
+        _sup_phase(_polish_phase)
+        _sup_emit("phase_enter", phase=_polish_phase, loop_type=loop_type)
+    except Exception:
+        pass
+
+    builds = state.get("builds", []) or []
+    if not builds:
+        try:
+            _sup_emit("phase_complete", phase=_polish_phase, loop_type=loop_type,
+                      elapsed_s=int(time.time() - _polish_t0),
+                      cost_usd=_run_costs["total_usd"])
+        except Exception:
+            pass
+        return {"phase": f"polish_loop_empty_{loop_type}"}
+
+    print(f"[{cfg['label']}] (unified) Running {loop_type} on {len(builds)} concepts")
+    span = tracer.start_span(f"polish_loop_{loop_type}", input={"build_count": len(builds)})
+
+    run_dir = RUNS_DIR / state["name"]
+    if loop_type == "qa":
+        (run_dir / "qa-reports").mkdir(parents=True, exist_ok=True)
+        (run_dir / "screenshots").mkdir(parents=True, exist_ok=True)
+        (run_dir / "walks").mkdir(parents=True, exist_ok=True)
+    else:  # judge
+        (run_dir / "judge-scores").mkdir(parents=True, exist_ok=True)
+        (run_dir / "walks").mkdir(parents=True, exist_ok=True)
+
+    # Max-iter resolution: state["polish_max_iter"][loop_type] → legacy default.
+    polish_max_iter = (state.get("polish_max_iter") or {})
+    max_iter = polish_max_iter.get(loop_type)
+    if max_iter is None:
+        max_iter = MAX_QA_ITERATIONS if loop_type == "qa" else MAX_JUDGE_ITERATIONS
+
+    # Threshold (judge only).
+    threshold = None
+    if loop_type == "judge":
+        polish_threshold = (state.get("polish_threshold") or {})
+        threshold = polish_threshold.get("judge") or JUDGE_DEFAULT_THRESHOLD
+
+    # Prev nested state for THIS loop_type.
+    prev_status = dict((state.get("polish_status", {}) or {}).get(loop_type, {}) or {})
+    prev_iters = dict((state.get("polish_iterations", {}) or {}).get(loop_type, {}) or {})
+    prev_reports = dict((state.get("polish_reports", {}) or {}).get(loop_type, {}) or {})
+
+    # qa-status precedence: judge skips concepts that didn't clear QA.
+    qa_polish_status = (state.get("polish_status", {}) or {}).get("qa", {}) or {}
+
+    new_status: Dict[int, str] = {}
+    new_iters: Dict[int, int] = {}
+    new_reports: Dict[int, dict] = {}
+
+    # Judge needs pre-baked sibling summaries + model config.
+    judge_kwargs: dict = {}
+    if loop_type == "judge":
+        judge_model = resolve_model("judge")
+        judge_max_tokens = max_output_for(judge_model, kind="verdict")
+        persona_path = WORKSPACE / "skills/creative-technologist/personas/REVIEWER.md"
+        persona = persona_path.read_text() if persona_path.exists() else ""
+        judge_score_prompt = prompts.get("judge_score")
+        judge_system = judge_score_prompt.compile(persona=persona)
+        approaches = state.get("approaches", []) or []
+        approach_by_idx: Dict[int, dict] = {}
+        for b in builds:
+            ap = _approach_for_designer(approaches, b.get("designer_id"))
+            if ap is not None:
+                approach_by_idx[b["index"]] = ap
+        judge_kwargs = {
+            "threshold": threshold,
+            "judge_model": judge_model,
+            "judge_max_tokens": judge_max_tokens,
+            "judge_system": judge_system,
+            "_approach_by_idx": approach_by_idx,
+        }
+
+    cost_broken_now = _cost_circuit_broken(state)
+    legacy_qa_reports_list: list = []  # mirror for legacy qa_reports list (qa only)
+
+    for b in builds:
+        idx = b["index"]
+
+        # Already-passed concepts are sticky.
+        if prev_status.get(idx) == pass_status:
+            new_status[idx] = pass_status
+            new_iters[idx] = prev_iters.get(idx, 0)
+            if idx in prev_reports:
+                new_reports[idx] = prev_reports[idx]
+                if loop_type == "qa":
+                    legacy_qa_reports_list.append(prev_reports[idx])
+            continue
+
+        # Judge: respect qa-status precedence.
+        if loop_type == "judge":
+            qa_s = qa_polish_status.get(idx)
+            if qa_s in ("failed_max", "cost_circuit"):
+                new_status[idx] = qa_s
+                new_iters[idx] = prev_iters.get(idx, 0)
+                if idx in prev_reports:
+                    new_reports[idx] = prev_reports[idx]
+                print(f"  ⏭ concept-{idx}: skipped (qa_status={qa_s})")
+                continue
+
+        # Cost circuit.
+        if cost_broken_now or prev_status.get(idx) == "cost_circuit":
+            new_status[idx] = "cost_circuit"
+            new_iters[idx] = prev_iters.get(idx, 0)
+            print(f"  ⛔ concept-{idx}: cost circuit broken — skipping {loop_type}")
+            continue
+
+        # Score / check this concept.
+        if loop_type == "qa":
+            # Make sure the build dict carries its current fix-attempt count for the helper.
+            b["qa_fix_attempts"] = prev_iters.get(idx, 0)
+            report, passes, reason = _run_polish_for_build(b, state, "qa", run_dir)
+
+            # Same-flag-twice guard (preserved from legacy qa_loop_node).
+            prev_report = prev_reports.get(idx) or {}
+            prev_issue_set = set(prev_report.get("issues") or [])
+            current_issue_set = set(report.get("issues") or [])
+            repeated = prev_issue_set & current_issue_set
+            if repeated and prev_iters.get(idx, 0) >= 1:
+                report["stuck_issues"] = sorted(repeated)
+                remaining = [iss for iss in (report.get("issues") or []) if iss not in repeated]
+                if remaining:
+                    report["issues"] = remaining
+                    if not [i for i in remaining if "BROKEN" in i or "blank" in i.lower() or "missing/empty" in i.lower()]:
+                        report["verdict"] = "FIXABLE"
+                else:
+                    report["issues"] = []
+                    report["verdict"] = "PASS"
+                    print(f"  ⚖️  concept-{idx}: same {len(repeated)} issue(s) flagged for 2+ iters — "
+                          f"promoting to PASS-with-warnings (stuck: {list(repeated)[:2]})")
+                # Re-evaluate `passes` after demotion.
+                passes = (report.get("verdict") == "PASS")
+
+            new_reports[idx] = report
+            legacy_qa_reports_list.append(report)
+        else:  # judge
+            siblings = "\n\n".join(
+                _summarize_approach_for_distinctiveness(judge_kwargs["_approach_by_idx"][other_idx])
+                for other_idx in judge_kwargs["_approach_by_idx"]
+                if other_idx != idx
+            )
+            report, passes, reason = _run_polish_for_build(
+                b, state, "judge", run_dir,
+                threshold=judge_kwargs["threshold"],
+                judge_model=judge_kwargs["judge_model"],
+                judge_max_tokens=judge_kwargs["judge_max_tokens"],
+                judge_system=judge_kwargs["judge_system"],
+                other_approach_summaries=siblings,
+            )
+            new_reports[idx] = report
+
+        current_iter = prev_iters.get(idx, 0)
+        # Pass 1 supervision: one loop_iter event per concept per cycle.
+        try:
+            _sup_emit(
+                "loop_iter",
+                loop_type=loop_type,
+                concept=idx,
+                iter=current_iter + 1,
+                verdict=(report.get("verdict") if isinstance(report, dict) else None) or "n/a",
+            )
+        except Exception:
+            pass
+        if passes:
+            new_status[idx] = pass_status
+            new_iters[idx] = current_iter
+            print(f"  ✅ concept-{idx}: {pass_status.upper()} — {reason}")
+        else:
+            if current_iter >= max_iter:
+                new_status[idx] = "failed_max"
+                new_iters[idx] = current_iter
+                print(f"  ❌ concept-{idx}: {loop_type} FAIL — {reason} — max iter ({max_iter}) reached")
+            else:
+                new_status[idx] = pending_status
+                # Increment HERE — don't rely on downstream nodes. The legacy
+                # builders write to legacy fields (qa_iterations /
+                # judge_polish_iterations), NOT to polish_iterations[loop_type],
+                # AND the playability builder can early-return on QA verdict
+                # BROKEN without bumping anything. That caused the unified path
+                # to spin forever at iter 0/N (smoke run 2026-05-16). Owning
+                # the increment here makes the unified path self-contained.
+                new_iters[idx] = current_iter + 1
+                print(f"  🔧 concept-{idx}: {loop_type} FAIL — {reason} — will retry (iter {current_iter+1}/{max_iter})")
+
+    pass_count = sum(1 for s in new_status.values() if s == pass_status)
+    pend_count = sum(1 for s in new_status.values() if s == pending_status)
+    fail_count = sum(1 for s in new_status.values() if s == "failed_max")
+    cc_count = sum(1 for s in new_status.values() if s == "cost_circuit")
+    print(f"[{cfg['label']}] (unified) Status: {pass_count} {pass_status} | {pend_count} {pending_status} | "
+          f"{fail_count} failed_max | {cc_count} cost_circuit")
+
+    tracer.end_span(span, output={
+        pass_status: pass_count, pending_status: pend_count,
+        "failed_max": fail_count, "cost_circuit": cc_count,
+    })
+
+    out: dict = {
+        "polish_status":     {loop_type: new_status},
+        "polish_iterations": {loop_type: new_iters},
+        "polish_reports":    {loop_type: new_reports},
+        "phase":             f"polish_loop_{loop_type}",
+        "cost_circuit_broken": cost_broken_now,
+    }
+    # Mirror to legacy qa_reports list so existing eval-app readers keep working
+    # while the unified flag is on. (Legacy qa_*/judge_* fields stay empty under
+    # the unified path — only the list mirror is kept for back-compat.)
+    if loop_type == "qa":
+        out["qa_reports"] = legacy_qa_reports_list
+    try:
+        _sup_emit("phase_complete", phase=_polish_phase, loop_type=loop_type,
+                  elapsed_s=int(time.time() - _polish_t0),
+                  cost_usd=_run_costs["total_usd"])
+    except Exception:
+        pass
+    return out
+
+
+def make_polish_loop(loop_type: str):
+    """Higher-order factory: returns (node, route, fan_out) closures for one loop_type.
+
+    The graph wires the returned `node` under the same node name as the legacy
+    counterpart ("qa_loop" or "judge_loop"), so the LangGraph topology is
+    unchanged — only the implementation deduplicates.
+
+    Returns (polish_loop_node_configured, route_after_polish_configured,
+             fan_out_polish_fix_configured).
+    """
+    cfg = _POLISH_LOOP_CONFIG[loop_type]
+    pending_status = cfg["pending_status"]
+    builder_mode = cfg["builder_mode"]
+    next_node = cfg["next_node"]
+
+    def _node(state: PipelineState) -> dict:
+        return polish_loop_node(state, loop_type)
+
+    def _fan_out(state: PipelineState) -> list:
+        """Fan out one Send per concept whose unified-status == pending_status for this loop_type."""
+        status = (state.get("polish_status", {}) or {}).get(loop_type, {}) or {}
+        builds = state.get("builds", []) or []
+        sends = []
+        for build in builds:
+            idx = build.get("index")
+            if idx is None:
+                continue
+            if status.get(idx) != pending_status:
+                continue
+            builder_model = build.get("model") or "claude-opus"
+            sends.append(Send("builder", {
+                **state,
+                "build_index": idx,
+                "builder_model": builder_model,
+                "builder_mode": builder_mode,
+            }))
+        return sends
+
+    def _route(state: PipelineState):
+        if _cost_circuit_broken(state):
+            return next_node
+        sends = _fan_out(state)
+        if sends:
+            return sends
+        return next_node
+
+    return _node, _route, _fan_out
+
+
+@_supervised("pairwise_rank")
 def pairwise_rank_node(state: PipelineState) -> dict:
     """Tie-breaker pairwise ranking pass, AFTER thresholds have decided pass/fail.
 
@@ -6783,6 +7919,412 @@ Review the evidence above and consider whether REVIEWER.md should be updated wit
     print(f"     Review it and apply approved changes to BUILDER.md / REVIEWER.md")
 
 
+# ── Terminal wiki ingest (Hermes repair 2026-05-15) ──────────────────
+# Ensure wiki_ingest runs on EVERY terminal state: success, failure, kill.
+# Today it only fires inside human_gate_node, so crashes and SIGTERMs lose
+# their failure lessons. Module-level guard prevents double-ingest when
+# human_gate already wrote.
+_TERMINAL_WIKI_INGESTED = False
+
+def _read_logs_tail(run_name: str, n_lines: int = 30) -> str:
+    """Best-effort tail of the detached launcher log for this run."""
+    try:
+        log_path = Path(f"/tmp/pipeline-runs/{run_name}.log")
+        if not log_path.exists():
+            return ""
+        lines = log_path.read_text(errors="replace").splitlines()
+        return "\n".join(lines[-n_lines:])
+    except Exception:
+        return ""
+
+def _detect_degraded_verdict(state: dict) -> bool:
+    """Return True iff verdict was 'completed' but >50% of concepts failed_max/cost_circuit.
+
+    Reads state.polish_status for both 'qa' and 'judge' loop_types, counts unique concept
+    indices whose status is in {'failed_max', 'cost_circuit'} for EITHER loop, divides by
+    total concepts. >0.5 → degraded.
+    """
+    try:
+        polish_status = state.get("polish_status", {}) or {}
+        bad_statuses = {"failed_max", "cost_circuit"}
+        bad_indices: set = set()
+        all_indices: set = set()
+        for loop_type in ("qa", "judge"):
+            per_loop = polish_status.get(loop_type, {}) or {}
+            for idx, status in per_loop.items():
+                all_indices.add(idx)
+                if status in bad_statuses:
+                    bad_indices.add(idx)
+        # Fallback to builds count if polish_status was empty
+        if not all_indices:
+            builds = state.get("builds", []) or []
+            total = len(builds)
+        else:
+            total = len(all_indices)
+        if total == 0:
+            return False
+        return (len(bad_indices) / total) > 0.5
+    except Exception:
+        return False
+
+
+def _classify_crash_symptom(verdict: str, exc_info, log_tail: str, state: dict) -> str:
+    """Auto-classify crash symptom from verdict/exception/log/state signals."""
+    try:
+        if verdict == "killed":
+            return "SIGTERM"
+        if exc_info is not None:
+            # Cost-circuit raised as exception?
+            msg = str(exc_info)
+            if "cost" in msg.lower() and ("circuit" in msg.lower() or "budget" in msg.lower()):
+                return "cost-circuit"
+            return "unhandled-exception"
+        if verdict == "degraded":
+            polish_status = state.get("polish_status", {}) or {}
+            all_status = []
+            for lt in ("qa", "judge"):
+                all_status.extend((polish_status.get(lt, {}) or {}).values())
+            if all_status and all(s in ("failed_max", "cost_circuit") for s in all_status):
+                if any(s == "cost_circuit" for s in all_status):
+                    return "cost-circuit"
+                return "failed_max-on-all"
+        # log-based heuristics
+        tail_lower = (log_tail or "").lower()
+        if "traceback" in tail_lower:
+            return "unhandled-exception"
+        if "retry" in tail_lower and tail_lower.count("retry") > 5:
+            return "retry-loop"
+        if "tool error" in tail_lower or "toolerror" in tail_lower:
+            return "tool-error"
+        return "unknown"
+    except Exception:
+        return "unknown"
+
+
+def _detect_last_phase(log_text: str) -> str:
+    """Walk a log bottom-up to find the most recent `=== PHASE ===` marker."""
+    if not log_text:
+        return "unknown"
+    try:
+        import re as _re
+        matches = list(_re.finditer(r"^===\s+([A-Z][A-Z0-9 _-]+?)\s+===\s*$",
+                                    log_text, flags=_re.MULTILINE))
+        if matches:
+            return matches[-1].group(1).strip().lower().replace(" ", "_")
+    except Exception:
+        pass
+    return "unknown"
+
+
+def _detect_last_node(log_text: str) -> str:
+    """Find the last `→ {node}:` marker in the log (best-effort)."""
+    if not log_text:
+        return "unknown"
+    try:
+        import re as _re
+        matches = list(_re.finditer(r"→\s+([A-Za-z_][A-Za-z0-9_]*)\s*:", log_text))
+        if matches:
+            return matches[-1].group(1)
+    except Exception:
+        pass
+    return "unknown"
+
+
+def _parse_cost_trajectory(log_text: str, max_points: int = 12) -> list:
+    """Extract a coarse cost-over-time trace from the log.
+
+    Looks for lines containing a `$N.NN` dollar amount and pairs them with the most
+    recent phase marker seen above the line. Returns a list of dict points.
+    """
+    if not log_text:
+        return []
+    points = []
+    try:
+        import re as _re
+        current_phase = "start"
+        dollar_re = _re.compile(r"\$(\d+\.\d{1,2})")
+        phase_re = _re.compile(r"^===\s+([A-Z][A-Z0-9 _-]+?)\s+===\s*$")
+        for line in log_text.splitlines():
+            ph = phase_re.match(line)
+            if ph:
+                current_phase = ph.group(1).strip().lower().replace(" ", "_")
+                continue
+            m = dollar_re.search(line)
+            if m:
+                points.append({
+                    "phase": current_phase,
+                    "cost": m.group(1),
+                    "line": line.strip()[:120],
+                })
+        # Dedupe consecutive identical phase+cost combos and trim
+        deduped: list = []
+        for p in points:
+            if deduped and deduped[-1]["phase"] == p["phase"] and deduped[-1]["cost"] == p["cost"]:
+                continue
+            deduped.append(p)
+        return deduped[-max_points:]
+    except Exception:
+        return []
+
+
+def _detect_retry_loop(log_text: str, state: dict) -> str:
+    """Heuristic: detect a stuck QA / judge / playability retry loop.
+
+    Strategy: count phase markers per loop_type; if >=5 AND state's
+    `polish_iterations[loop_type]` shows iter values that did not progress (same value
+    appears repeatedly), flag as stuck.
+    """
+    if not log_text:
+        return "none detected (no log)"
+    findings = []
+    try:
+        import re as _re
+        markers = {
+            "qa": r"\[QA-LOOP\]\s*\(unified\)",
+            "judge": r"\[JUDGE-LOOP\]\s*\(unified\)",
+            "playability": r"\[PLAYABILITY",
+        }
+        polish_iters = state.get("polish_iterations", {}) or {}
+        for loop, pat in markers.items():
+            count = len(_re.findall(pat, log_text))
+            if count < 5:
+                continue
+            iters_map = (polish_iters.get(loop, {}) or {})
+            # Look for any concept whose iter appears unchanged across many cycles —
+            # heuristic: if max iter < count/2, something is stuck.
+            if iters_map:
+                max_iter = max(iters_map.values()) if iters_map.values() else 0
+                if max_iter > 0 and count >= max_iter * 2:
+                    findings.append(
+                        f"{loop.upper()}-LOOP-STUCK detected: {count} cycles in log, "
+                        f"max iter={max_iter} (iter likely not advancing)"
+                    )
+            else:
+                findings.append(
+                    f"{loop.upper()}-LOOP-STUCK detected: {count} cycles in log, "
+                    f"no polish_iterations recorded for this loop"
+                )
+    except Exception as e:
+        return f"detection failed: {e}"
+    return "; ".join(findings) if findings else "none detected"
+
+
+def _emit_crash_page(state: dict, verdict: str,
+                     exc_info: Optional[BaseException],
+                     log_tail: str, run_dir: Optional[Path]) -> Optional[Path]:
+    """Write a structured crash page for failed / killed / degraded runs.
+
+    Lands at ~/.openclaw/workspace/memory/pipeline-wiki/crashes/{name}.md
+    (pipeline-wiki is a symlink to pipeline/wiki — so we write to WIKI_DIR/crashes/).
+
+    Also appends a `## See also: [[crashes/{name}]]` line to runs/{name}.md when
+    that file exists.
+
+    Returns the crash-page path on success, None on failure. Non-fatal.
+    """
+    try:
+        run_name = state.get("name", "unknown-run")
+        crashes_dir = WIKI_DIR / "crashes"
+        crashes_dir.mkdir(parents=True, exist_ok=True)
+        crash_path = crashes_dir / f"{run_name}.md"
+
+        # Pull full log if available for richer detection; fall back to tail.
+        full_log = ""
+        try:
+            log_path = Path(f"/tmp/pipeline-runs/{run_name}.log")
+            if log_path.exists():
+                full_log = log_path.read_text(errors="replace")
+        except Exception:
+            full_log = log_tail or ""
+        log_text_for_detect = full_log or (log_tail or "")
+
+        # Compute fields
+        ts_iso = time.strftime("%Y-%m-%dT%H:%M:%S%z") or time.strftime("%Y-%m-%dT%H:%M:%S")
+        total_cost = state.get("cost_usd", 0) or 0
+        last_phase = _detect_last_phase(log_text_for_detect)
+        last_node = _detect_last_node(log_text_for_detect)
+        symptom = _classify_crash_symptom(verdict, exc_info, log_text_for_detect, state)
+        retry_loop = _detect_retry_loop(log_text_for_detect, state)
+        cost_traj = _parse_cost_trajectory(log_text_for_detect)
+
+        # Iteration counts (best-effort, per loop_type → max across concepts)
+        polish_iters = state.get("polish_iterations", {}) or {}
+        def _max_iter(lt: str) -> int:
+            m = polish_iters.get(lt, {}) or {}
+            try:
+                return max(m.values()) if m else 0
+            except Exception:
+                return 0
+        qa_iter = _max_iter("qa")
+        judge_iter = _max_iter("judge")
+        play_iter = _max_iter("playability")
+        # Some runs use the legacy judge_polish_iterations dict
+        if judge_iter == 0:
+            legacy = state.get("judge_polish_iterations", {}) or {}
+            try:
+                judge_iter = max(legacy.values()) if legacy else 0
+            except Exception:
+                pass
+
+        # Last 50 log lines (raw)
+        last_50 = ""
+        if full_log:
+            last_50 = "\n".join(full_log.splitlines()[-50:])
+        elif log_tail:
+            last_50 = log_tail
+
+        # Exception block
+        if exc_info is not None:
+            try:
+                import traceback as _tb
+                tb_str = "".join(_tb.format_exception(type(exc_info), exc_info,
+                                                     exc_info.__traceback__))
+            except Exception:
+                tb_str = f"{type(exc_info).__name__}: {exc_info}"
+            tb_str = tb_str.strip()
+        else:
+            tb_str = "N/A — terminated by signal" if verdict == "killed" else "N/A"
+
+        builds_count = len(state.get("builds", []) or [])
+        builder_mode = state.get("builder_mode", "?")
+
+        lines = []
+        lines.append(f"# Crash: {run_name}")
+        lines.append(f"- **Date:** {ts_iso}")
+        lines.append(f"- **Verdict:** {verdict}")
+        lines.append(f"- **Phase at terminal:** {last_phase}")
+        lines.append(f"- **Cost at crash:** ${total_cost:.2f}" if isinstance(total_cost, (int, float))
+                     else f"- **Cost at crash:** ${total_cost}")
+        lines.append(f"- **Last successful node:** {last_node}")
+        lines.append(f"- **Iterations completed:** qa={qa_iter}, judge={judge_iter}, playability={play_iter}")
+        lines.append("")
+        lines.append("## Symptom (auto-classified)")
+        lines.append(symptom)
+        lines.append("")
+        lines.append("## Last exception (if any)")
+        lines.append("```")
+        lines.append(tb_str)
+        lines.append("```")
+        lines.append("")
+        lines.append("## Retry-loop detection")
+        lines.append(retry_loop)
+        lines.append("")
+        lines.append("## Cost trajectory")
+        if cost_traj:
+            for p in cost_traj:
+                lines.append(f"- {p['phase']}: ${p['cost']} ({p['line']})")
+        else:
+            lines.append("(no cost markers parsed from log)")
+        lines.append("")
+        lines.append("## Last 50 log lines (raw)")
+        lines.append("```")
+        lines.append(last_50 or "(log unavailable)")
+        lines.append("```")
+        lines.append("")
+        lines.append("## State snapshot at crash")
+        lines.append(f"- polish_iterations: {polish_iters}")
+        lines.append(f"- polish_status: {state.get('polish_status', {})}")
+        lines.append(f"- build count: {builds_count}")
+        lines.append(f"- builder_mode: {builder_mode}")
+        lines.append("")
+        lines.append("## Linked lessons")
+        lines.append("(Mira will populate this via a separate cross-link pass.)")
+        lines.append("")
+        lines.append("## See also")
+        lines.append(f"- [[runs/{run_name}]] (full run page)")
+        lines.append("")
+
+        crash_path.write_text("\n".join(lines))
+
+        # Append a `## See also: [[crashes/{name}]]` line to the existing runs page,
+        # if it exists. Open-append; do NOT rewrite the template.
+        try:
+            run_page = WIKI_DIR / "runs" / f"{run_name}.md"
+            if run_page.exists():
+                see_also_line = f"\n## See also\n- [[crashes/{run_name}]] (crash page)\n"
+                existing = run_page.read_text(errors="replace")
+                # Idempotency: only append if not already linked
+                if f"crashes/{run_name}" not in existing:
+                    with open(run_page, "a") as f:
+                        f.write(see_also_line)
+        except Exception as e:
+            print(f"  ⚠️  Crash page see-also append failed (non-fatal): {e}")
+
+        print(f"  💥 Crash page written: {crash_path}")
+        return crash_path
+    except Exception as e:
+        print(f"  ⚠️  Crash page emit failed (non-fatal): {e}")
+        return None
+
+
+def _terminal_wiki_ingest(run_name: str, app, config: dict,
+                          verdict: str,
+                          exc_info: Optional[BaseException] = None) -> None:
+    """Call wiki_ingest at pipeline exit for any terminal state.
+
+    verdict: 'completed' | 'failed' | 'killed'
+    Idempotent within a process — skipped if human_gate already ingested.
+    Non-fatal: never raises.
+
+    Also emits a structured crash page (~/.../pipeline-wiki/crashes/{name}.md)
+    when the verdict is bad: killed, failed, or degraded (the latter is detected
+    post-hoc from polish_status when verdict=='completed' but >50% of concepts
+    failed_max / cost_circuit).
+    """
+    global _TERMINAL_WIKI_INGESTED
+    if _TERMINAL_WIKI_INGESTED:
+        return
+    try:
+        try:
+            state_obj = app.get_state(config)
+            state = dict(state_obj.values) if state_obj and state_obj.values else {}
+        except Exception:
+            state = {}
+        state.setdefault("name", run_name)
+
+        logs_tail = _read_logs_tail(run_name, 30)
+        exc_summary = ""
+        if exc_info is not None:
+            exc_summary = f"{type(exc_info).__name__}: {str(exc_info)[:500]}"
+
+        feedback_parts = [f"[terminal_verdict={verdict}]"]
+        if exc_summary:
+            feedback_parts.append(f"Exception: {exc_summary}")
+        if logs_tail:
+            feedback_parts.append(f"Last 30 log lines:\n{logs_tail}")
+        feedback = "\n\n".join(feedback_parts)
+
+        # Pass 1 supervision: final terminal event + exit-code + heartbeat stop.
+        # Called BEFORE wiki_ingest so a wiki failure doesn't lose the terminal
+        # signal. Supervisor never raises.
+        try:
+            _sup_shutdown(verdict, exception=exc_summary or None,
+                          total_usd=_run_costs.get("total_usd", 0.0))
+        except Exception:
+            pass
+        wiki_ingest(state, verdict, feedback)
+        _TERMINAL_WIKI_INGESTED = True
+        print(f"  📚 Terminal wiki ingest complete (verdict={verdict})")
+
+        # Crash-page emission. The wiki run entry above keeps the original verdict
+        # for backwards compatibility (existing readers expect "completed" /
+        # "failed" / "killed"); the crash page uses a `degraded` verdict when the
+        # run technically completed but most concepts failed.
+        try:
+            crash_verdict = verdict
+            if verdict == "completed" and _detect_degraded_verdict(state):
+                crash_verdict = "degraded"
+            if crash_verdict in ("killed", "failed", "degraded"):
+                run_dir = RUNS_DIR / run_name if "RUNS_DIR" in globals() else None
+                full_log_tail = _read_logs_tail(run_name, 50)
+                _emit_crash_page(state, crash_verdict, exc_info, full_log_tail, run_dir)
+        except Exception as e:
+            print(f"  ⚠️  Crash page wiring failed (non-fatal): {e}")
+    except Exception as e:
+        print(f"  ⚠️  Terminal wiki ingest failed (non-fatal): {e}")
+
+
+@_supervised("human_gate")
 def human_gate_node(state: PipelineState) -> Command:
     """Phase 7: Pause for human taste review.
     
@@ -6873,6 +8415,8 @@ def human_gate_node(state: PipelineState) -> Command:
             append_to_calibration_set(state, structured_verdict)
         else:
             wiki_ingest(state, human_decision, human_feedback)
+        # Mark so the terminal-exit wrapper in main() doesn't double-ingest.
+        globals()["_TERMINAL_WIKI_INGESTED"] = True
     except Exception as e:
         print(f"  ⚠️  Wiki ingest failed (non-fatal): {e}")
     
@@ -6895,6 +8439,7 @@ def human_gate_node(state: PipelineState) -> Command:
         })
 
 
+@_supervised("iterate")
 def iterate_node(state: PipelineState) -> dict:
     """Phase 6: Increment iteration counter and loop back."""
     iteration = state.get("iteration", 0) + 1
@@ -6926,6 +8471,7 @@ def iterate_node(state: PipelineState) -> dict:
     }
 
 
+@_supervised("deploy")
 def deploy_node(state: PipelineState) -> dict:
     """Phase 8: Deploy winning build."""
     print(f"[DEPLOY] Deploying winning build")
@@ -6947,25 +8493,40 @@ def deploy_node(state: PipelineState) -> dict:
 
 # ── Build the Graph ────────────────────────────────────────────
 
-def build_graph():
+def build_graph(use_unified_polish_loop: bool = False):
     graph = StateGraph(PipelineState)
 
     # Add nodes
+    graph.add_node("scope_contract", scope_contract_node)
     graph.add_node("research", research_node)
     graph.add_node("designer", designer_node)
     graph.add_node("approach_gate", approach_gate_node)
     graph.add_node("asset_gen", asset_gen_node)
     graph.add_node("builder", builder_node)
-    # New loop nodes (2026-05-13 refactor)
-    graph.add_node("qa_loop", qa_loop_node)
-    graph.add_node("judge_loop", judge_loop_node)
+
+    # Polish loops — unified path (Option A, behind --use-unified-polish-loop)
+    # uses a single factory-built body for both nodes; legacy path keeps the
+    # original two distinct functions. Node names are IDENTICAL across both
+    # paths so the graph topology + checkpoint compatibility are preserved.
+    if use_unified_polish_loop:
+        unified_qa_node, route_after_qa, _fan_qa = make_polish_loop("qa")
+        unified_judge_node, route_after_judge, _fan_judge = make_polish_loop("judge")
+        graph.add_node("qa_loop", unified_qa_node)
+        graph.add_node("judge_loop", unified_judge_node)
+    else:
+        graph.add_node("qa_loop", qa_loop_node)
+        graph.add_node("judge_loop", judge_loop_node)
+        route_after_qa = route_after_qa_loop
+        route_after_judge = route_after_judge_loop
+
     graph.add_node("pairwise_rank", pairwise_rank_node)
     graph.add_node("human_gate", human_gate_node)
     graph.add_node("iterate", iterate_node)
     graph.add_node("deploy", deploy_node)
 
     # Edges
-    graph.add_edge(START, "research")
+    graph.add_edge(START, "scope_contract")
+    graph.add_edge("scope_contract", "research")
     graph.add_conditional_edges("research", fan_out_designers, ["designer"])
     graph.add_edge("designer", "approach_gate")
     graph.add_edge("approach_gate", "asset_gen")
@@ -6974,9 +8535,9 @@ def build_graph():
     # builder → qa_loop (initial / qa_fix) OR judge_loop (judge_polish)
     graph.add_conditional_edges("builder", route_after_builder, ["qa_loop", "judge_loop"])
     # qa_loop → builder (qa_fix Sends) OR judge_loop
-    graph.add_conditional_edges("qa_loop", route_after_qa_loop, ["builder", "judge_loop"])
+    graph.add_conditional_edges("qa_loop", route_after_qa, ["builder", "judge_loop"])
     # judge_loop → builder (judge_polish Sends) OR pairwise_rank
-    graph.add_conditional_edges("judge_loop", route_after_judge_loop, ["builder", "pairwise_rank"])
+    graph.add_conditional_edges("judge_loop", route_after_judge, ["builder", "pairwise_rank"])
     graph.add_edge("pairwise_rank", "human_gate")
     # human_gate uses Command() to route to deploy/iterate/END
     graph.add_conditional_edges("iterate", fan_out_designers, ["designer"])
@@ -7008,12 +8569,18 @@ def main():
                             help="Judge threshold: weighted total a concept must clear (default 7.0).")
     run_parser.add_argument("--judge-threshold-min-dim", type=float, default=JUDGE_DEFAULT_THRESHOLD["min_dimension"],
                             help="Judge threshold: minimum dimension score (default 5.0).")
+    run_parser.add_argument("--use-unified-polish-loop", action="store_true", default=False,
+                            help="(2026-05-15) Use the unified polish_loop_node for both qa_loop and "
+                                 "judge_loop. Dark-launch flag; default False keeps legacy nodes wired.")
     
     # Resume
     resume_parser = sub.add_parser("resume", help="Resume a paused pipeline")
     resume_parser.add_argument("--thread", required=True, help="Thread ID to resume")
     resume_parser.add_argument("--decision", choices=["approve", "iterate", "reject"], required=True)
     resume_parser.add_argument("--feedback", default="", help="Optional feedback for iteration")
+    resume_parser.add_argument("--use-unified-polish-loop", action="store_true", default=False,
+                               help="Defensive flag mirror; state-driven resume normally reads "
+                                    "this from checkpoint, but accept it on the CLI too.")
     
     # Status
     status_parser = sub.add_parser("status", help="Check pipeline status")
@@ -7022,12 +8589,22 @@ def main():
     args = parser.parse_args()
     
     # Build graph with checkpointer
-    graph = build_graph()
+    graph = build_graph(use_unified_polish_loop=getattr(args, "use_unified_polish_loop", False))
     conn = sqlite3.connect(str(DB_PATH), check_same_thread=False)
     checkpointer = SqliteSaver(conn)
     app = graph.compile(checkpointer=checkpointer)
     
-    config = {"configurable": {"thread_id": args.thread if hasattr(args, 'thread') else args.name}}
+    # LangGraph recursion limit — default is 25 supersteps, which is too low
+    # for this pipeline (it has multiple legitimate fan-outs: designer × 3 →
+    # builder × 3 → qa_loop with up to MAX_QA_ITERATIONS × 3 fan-ins →
+    # judge_loop fan-out, etc). Bumping to 150 gives the legitimate work
+    # plenty of headroom while still catching genuine runaway loops. (v7
+    # asset-utilization doom-loop crashed at 25 even though MAX_QA_ITERATIONS
+    # was set to 20.)
+    config = {
+        "configurable": {"thread_id": args.thread if hasattr(args, 'thread') else args.name},
+        "recursion_limit": 150,
+    }
     
     if args.command == "run":
         brief_path = Path(args.brief)
@@ -7090,6 +8667,27 @@ def main():
                 "min_dimension": float(getattr(args, "judge_threshold_min_dim", JUDGE_DEFAULT_THRESHOLD["min_dimension"])),
                 "ai_slop_hardcap": JUDGE_DEFAULT_THRESHOLD["ai_slop_hardcap"],
             },
+            # Unified polish loop overrides — mirror the legacy fields above. Seeding
+            # these makes the --qa-iter / --judge-iter / --judge-threshold-* CLI flags
+            # actually take effect under --use-unified-polish-loop. Without this, the
+            # unified path silently fell back to MAX_QA_ITERATIONS / MAX_JUDGE_ITERATIONS
+            # regardless of the override (see smoke2 2026-05-16 retry storm at iter 16/20
+            # despite --qa-iter 2). Bug ratified + fix dispatched 2026-05-16.
+            "polish_max_iter": {
+                "qa":    int(getattr(args, "qa_iter",    MAX_QA_ITERATIONS)),
+                "judge": int(getattr(args, "judge_iter", MAX_JUDGE_ITERATIONS)),
+            },
+            "polish_threshold": {
+                "judge": {
+                    "weighted_total": float(getattr(args, "judge_threshold_total", JUDGE_DEFAULT_THRESHOLD["weighted_total"])),
+                    "min_dimension": float(getattr(args, "judge_threshold_min_dim", JUDGE_DEFAULT_THRESHOLD["min_dimension"])),
+                    "ai_slop_hardcap": JUDGE_DEFAULT_THRESHOLD["ai_slop_hardcap"],
+                },
+                # "qa" loop_type has no threshold — pass detection is binary/issue-driven.
+            },
+            "polish_iterations": {},  # populated by polish_loop_node
+            "polish_status": {},      # populated by polish_loop_node
+            "polish_reports": {},     # populated by polish_loop_node
             "cost_circuit_broken": False,
         }
         # Honor --max-cost by mutating the module-level constant before the run
@@ -7128,16 +8726,53 @@ def main():
         print(f"\n🚀 Starting pipeline: {args.name}")
         print(f"Brief: {brief_path}")
         print(f"State stored in: {DB_PATH}\n")
+
+        # Pass 1 supervision: init events/heartbeat/cost streams. Best-effort.
+        try:
+            _sup_init(args.name, cost_getter=lambda: _run_costs.get("total_usd", 0.0))
+        except Exception:
+            pass
         
-        for event in app.stream(initial_state, config, stream_mode="updates"):
-            if isinstance(event, dict):
-                for node, update in event.items():
-                    if isinstance(update, dict):
-                        phase = update.get("phase", "")
-                        if phase:
-                            print(f"  → {node}: {phase}")
-                    else:
-                        print(f"  → {node}: {update}")
+        # Install SIGTERM handler so kills (cost-budget breaker, manual kill,
+        # supervisor stop) still ingest a 'killed' verdict into the wiki.
+        import signal as _signal
+        def _sigterm_handler(_signum, _frame):
+            try:
+                _terminal_wiki_ingest(args.name, app, config, verdict="killed",
+                                      exc_info=RuntimeError(f"SIGTERM received (signum={_signum})"))
+            finally:
+                # Re-raise as default behavior so the process actually exits.
+                raise SystemExit(143)
+        try:
+            _signal.signal(_signal.SIGTERM, _sigterm_handler)
+        except Exception:
+            pass
+
+        _stream_exception: Optional[BaseException] = None
+        try:
+            for event in app.stream(initial_state, config, stream_mode="updates"):
+                if isinstance(event, dict):
+                    for node, update in event.items():
+                        if isinstance(update, dict):
+                            phase = update.get("phase", "")
+                            if phase:
+                                print(f"  → {node}: {phase}")
+                        else:
+                            print(f"  → {node}: {update}")
+        except KeyboardInterrupt as e:
+            _stream_exception = e
+            _terminal_wiki_ingest(args.name, app, config, verdict="killed", exc_info=e)
+            raise
+        except BaseException as e:
+            _stream_exception = e
+            _terminal_wiki_ingest(args.name, app, config, verdict="failed", exc_info=e)
+            raise
+        finally:
+            if _stream_exception is None:
+                # Normal completion path. If human_gate didn't ingest (e.g. ran
+                # to END without hitting the gate, or completed via deploy),
+                # this fires; otherwise the guard skips it.
+                _terminal_wiki_ingest(args.name, app, config, verdict="completed")
         
         # Phase 3: rollup cost + run metadata into the final trace
         try:
@@ -7170,14 +8805,47 @@ def main():
                 print(f"  ⚠️  Failed to update langfuse-trace.json: {e}")
         print(f"\n🔄 Resuming pipeline: {args.thread}")
         print(f"Decision: {args.decision}")
+
+        # Pass 1 supervision: re-init for resume process. Events from prior
+        # process are preserved (append-only); this process appends new ones.
+        try:
+            _sup_init(args.thread, cost_getter=lambda: _run_costs.get("total_usd", 0.0))
+        except Exception:
+            pass
         
         resume_value = {"decision": args.decision, "feedback": args.feedback}
 
-        for event in app.stream(Command(resume=resume_value), config, stream_mode="updates"):
-            for node, update in event.items():
-                phase = update.get("phase", "")
-                if phase:
-                    print(f"  → {node}: {phase}")
+        # Same terminal-ingest guard for the resume path.
+        import signal as _signal
+        def _sigterm_handler_resume(_signum, _frame):
+            try:
+                _terminal_wiki_ingest(args.thread, app, config, verdict="killed",
+                                      exc_info=RuntimeError(f"SIGTERM received (signum={_signum})"))
+            finally:
+                raise SystemExit(143)
+        try:
+            _signal.signal(_signal.SIGTERM, _sigterm_handler_resume)
+        except Exception:
+            pass
+
+        _resume_exception: Optional[BaseException] = None
+        try:
+            for event in app.stream(Command(resume=resume_value), config, stream_mode="updates"):
+                for node, update in event.items():
+                    phase = update.get("phase", "")
+                    if phase:
+                        print(f"  → {node}: {phase}")
+        except KeyboardInterrupt as e:
+            _resume_exception = e
+            _terminal_wiki_ingest(args.thread, app, config, verdict="killed", exc_info=e)
+            raise
+        except BaseException as e:
+            _resume_exception = e
+            _terminal_wiki_ingest(args.thread, app, config, verdict="failed", exc_info=e)
+            raise
+        finally:
+            if _resume_exception is None:
+                _terminal_wiki_ingest(args.thread, app, config, verdict="completed")
 
         # Phase 3: rollup at end of resume
         try:

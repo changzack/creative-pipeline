@@ -44,7 +44,17 @@ def generate_eval_html(run_dir: Path, builds_base_url: str = "") -> str:
     # Collect build info
     builds = []
     for html_file in sorted(builds_dir.glob("concept-*.html")):
-        idx = int(html_file.stem.split("-")[1])
+        # Skip intermediate snapshots (e.g. concept-0.pre-playability-iter1-*.html)
+        if "." in html_file.stem.split("-", 1)[1] if "-" in html_file.stem else False:
+            continue
+        stem_parts = html_file.stem.split("-")
+        # Final builds look like concept-0, concept-1, concept-2 (exactly 2 parts).
+        if len(stem_parts) != 2:
+            continue
+        try:
+            idx = int(stem_parts[1])
+        except ValueError:
+            continue
         size_kb = html_file.stat().st_size // 1024
         
         # Try to find approach doc for techniques

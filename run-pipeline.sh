@@ -1,44 +1,73 @@
 #!/bin/bash
-# run-pipeline.sh — Detached pipeline runner
-# Runs pipeline.py in background, survives terminal/session closure.
-#
-# Required env vars (set in .env or export before running):
-#   ANTHROPIC_API_KEY, OPENAI_API_KEY, GOOGLE_API_KEY
-# Optional:
-#   FAL_KEY (for asset generation), LANGFUSE_PUBLIC_KEY, LANGFUSE_SECRET_KEY
+# Run pipeline.py as a detached process (survives OpenClaw session cleanup)
+# Usage: ./run-pipeline.sh run --brief path/to/brief.md --name my-run
+#        ./run-pipeline.sh resume --thread my-run --decision approve
+#        ./run-pipeline.sh status --thread my-run
 
-set -euo pipefail
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+VENV="$SCRIPT_DIR/.venv/bin/activate"
+LOG_DIR="/tmp/pipeline-runs"
+mkdir -p "$LOG_DIR"
 
-# Load .env if present
-if [ -f "$(dirname "$0")/.env" ]; then
-    set -a
-    source "$(dirname "$0")/.env"
-    set +a
-fi
-
-# Validate required keys
-for key in ANTHROPIC_API_KEY OPENAI_API_KEY GOOGLE_API_KEY; do
-    if [ -z "${!key:-}" ]; then
-        echo "ERROR: $key is not set. Export it or add to .env"
-        exit 1
+# Extract run name for log file
+RUN_NAME="pipeline"
+for arg in "$@"; do
+    if [[ "$prev" == "--name" || "$prev" == "--thread" ]]; then
+        RUN_NAME="$arg"
+        break
     fi
+    prev="$arg"
 done
 
-if [ -z "${FAL_KEY:-}" ]; then
-    echo "WARNING: FAL_KEY not set — asset generation will be skipped"
+LOG_FILE="$LOG_DIR/$RUN_NAME.log"
+
+if [[ "$1" == "status" ]]; then
+    # Status is quick — run inline
+    source "$VENV"
+    export ANTHROPIC_API_KEY="${ANTHROPIC_API_KEY:?ANTHROPIC_API_KEY is required (set in .env or export before running)}"
+    export OPENAI_API_KEY="${OPENAI_API_KEY:?OPENAI_API_KEY is required (set in .env or export before running)}"
+    export GOOGLE_API_KEY="${GOOGLE_API_KEY:?GOOGLE_API_KEY is required (set in .env or export before running)}"
+    export FAL_KEY="${FAL_KEY:?FAL_KEY is required (set in .env or export before running)}"
+    export LANGFUSE_HOST="http://localhost:3000"
+    export LANGFUSE_PUBLIC_KEY="${LANGFUSE_PUBLIC_KEY:?LANGFUSE_PUBLIC_KEY is required (set in .env or export before running)}"
+    export LANGFUSE_SECRET_KEY="${LANGFUSE_SECRET_KEY:?LANGFUSE_SECRET_KEY is required (set in .env or export before running)}"
+    cd "$SCRIPT_DIR"
+    python3 pipeline.py "$@"
+    exit $?
 fi
 
-NAME="${1:?Usage: $0 <run-name> [extra-args...]}"
-shift
-LOGFILE="/tmp/pipeline-runs/${NAME}.log"
-mkdir -p /tmp/pipeline-runs
+# Run/Resume — fully detach via nohup to survive parent kill
+echo "Starting pipeline (fully detached)..."
+echo "Log: $LOG_FILE"
 
-echo "Starting pipeline: $NAME"
-echo "Log: $LOGFILE"
+# Write a runner script that nohup will execute
+RUNNER="/tmp/pipeline-runs/$RUN_NAME.runner.sh"
+cat > "$RUNNER" << RUNNER_EOF
+#!/bin/bash
+source "$VENV"
+export ANTHROPIC_API_KEY="${ANTHROPIC_API_KEY:?ANTHROPIC_API_KEY is required (set in .env or export before running)}"
+export OPENAI_API_KEY="${OPENAI_API_KEY:?OPENAI_API_KEY is required (set in .env or export before running)}"
+export GOOGLE_API_KEY="${GOOGLE_API_KEY:?GOOGLE_API_KEY is required (set in .env or export before running)}"
+export FAL_KEY="${FAL_KEY:?FAL_KEY is required (set in .env or export before running)}"
+export LANGFUSE_HOST="http://localhost:3000"
+export LANGFUSE_PUBLIC_KEY="${LANGFUSE_PUBLIC_KEY:?LANGFUSE_PUBLIC_KEY is required (set in .env or export before running)}"
+export LANGFUSE_SECRET_KEY="${LANGFUSE_SECRET_KEY:?LANGFUSE_SECRET_KEY is required (set in .env or export before running)}"
+export PYTHONUNBUFFERED=1
+cd "$SCRIPT_DIR"
+python3 pipeline.py $@ >> "$LOG_FILE" 2>&1
+echo "PIPELINE_EXIT_CODE=\$?" >> "$LOG_FILE"
+echo "done" > "$LOG_DIR/$RUN_NAME.status"
+RUNNER_EOF
+chmod +x "$RUNNER"
 
-nohup python3 pipeline.py run --name "$NAME" "$@" > "$LOGFILE" 2>&1 &
-PID=$!
-disown $PID
+# nohup + redirect + & — fully detached from calling shell
+nohup bash "$RUNNER" > /dev/null 2>&1 &
+BGPID=$!
+echo "$BGPID" > "$LOG_DIR/$RUN_NAME.pid"
 
-echo "Pipeline running as PID $PID"
-echo "Monitor: tail -f $LOGFILE"
+# Disown so it survives shell exit
+disown $BGPID 2>/dev/null
+
+echo "Pipeline running (PID: $BGPID)"
+echo "Monitor: tail -f $LOG_FILE"
+echo "Status:  ./run-pipeline.sh status --thread $RUN_NAME"
