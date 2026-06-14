@@ -139,6 +139,22 @@ JUDGE_DEFAULT_THRESHOLD = {
     "ai_slop_hardcap": True,
 }
 
+# Single source of truth for the judge rubric (Bundle B rebalance, 2026-05-16).
+# The judge LLM computes weighted_total per these weights (see prompts/judge_score.txt
+# and skills/creative-technologist/personas/REVIEWER.md). The 6 weighted dimensions
+# sum to 0.90, so weighted_total max is 9.0 (the 7.0 threshold = ~78% of max).
+# AI Slop is hardcap-only (not weighted). Technical Execution is a binary gate.
+JUDGE_RUBRIC_WEIGHTS = {
+    "creative_ambition": 0.30,
+    "brief_fit": 0.20,
+    "visual_depth": 0.10,
+    "distinctiveness": 0.05,
+    "typography": 0.12,
+    "hierarchy_readability": 0.13,
+}
+assert abs(sum(JUDGE_RUBRIC_WEIGHTS.values()) - 0.90) < 1e-9, \
+    f"JUDGE_RUBRIC_WEIGHTS must sum to 0.90, got {sum(JUDGE_RUBRIC_WEIGHTS.values())}"
+
 # ── Pinned Model Versions ──────────────────────────────────────
 # Use dated snapshots where available to prevent silent behavior changes.
 # Update these explicitly after testing new versions.
@@ -149,6 +165,7 @@ JUDGE_DEFAULT_THRESHOLD = {
 MAX_OUTPUT_TOKENS = {
     "claude-opus-4-7": 128000,    # Opus 4.7 supports 128K output (sync); 300K via batch
     "claude-opus-4-6": 64000,     # legacy; older Opus caps lower
+    "claude-sonnet-4-5": 64000,   # Sonnet 4.5 max output (sync)
     "gpt-5.5":         100000,    # GPT-5.5 max output
     "gpt-5.4":         32000,     # legacy
     "gemini-3.1-pro":  65536,     # Gemini 3.1 Pro hard ceiling
@@ -160,6 +177,7 @@ MAX_OUTPUT_TOKENS = {
 # the model to be concise, not to write a novel.
 MAX_OUTPUT_TOKENS_VERDICT = {
     "claude-opus-4-7": 16000,
+    "claude-sonnet-4-5": 16000,
     "gpt-5.5":         16000,
     "gemini-3.1-pro":  16000,
     "gemini-pro-latest": 16000,
@@ -185,6 +203,7 @@ PINNED_MODELS = {
     # Builders / generators — frontier tier
     "claude-opus": "claude-opus-4-7",              # Anthropic: latest Opus (Apr 2026)
     "claude-opus-4-6": "claude-opus-4-7",          # legacy alias → redirected to 4-7
+    "claude-sonnet": "claude-sonnet-4-5",          # Anthropic: Sonnet 4.5 (default Sonnet alias)
     "gpt-5": "gpt-5.5",                           # OpenAI: GPT-5.5 (Apr 24 2026 GA)
     "gpt-5.4": "gpt-5.5",                          # legacy alias → redirected to 5.5
     "gpt-5.5": "gpt-5.5",
@@ -212,6 +231,7 @@ def resolve_model(alias: str) -> str:
 COST_PER_1M = {
     "claude-opus-4-6": {"input": 15.0, "output": 75.0},
     "claude-opus-4-7": {"input": 15.0, "output": 75.0},
+    "claude-sonnet-4-5": {"input": 3.0, "output": 15.0},
     "gpt-4o": {"input": 2.5, "output": 10.0},
     "gpt-4.1": {"input": 2.0, "output": 8.0},
     "gpt-5.4": {"input": 2.50, "output": 10.0},
@@ -256,6 +276,47 @@ def track_cost(model: str, input_tokens: int, output_tokens: int, phase: str = "
     except Exception:
         pass
     return cost
+
+
+# ── Canonical cost telemetry ────────────────────────────────────
+# `_run_costs["total_usd"]` is THE single source of truth for run cost.
+# `state["cost_usd"]` is a mirror kept in sync via `_sync_state_cost()` so
+# consumers that only see PipelineState (wiki/crash ingest, persisted graph
+# state) read consistent values. If they ever drift > $0.01 we log loudly
+# but do not crash — telemetry mismatch must never tank a run.
+_COST_EPSILON_USD = 0.01
+
+def _canonical_cost_usd() -> float:
+    """Return THE current run cost. Always prefer this over state['cost_usd']."""
+    return float(_run_costs.get("total_usd", 0.0))
+
+def _sync_state_cost(state: dict) -> float:
+    """Mirror canonical cost into state['cost_usd'] and return it. Call at
+    node exits and before any consumer reads state['cost_usd']."""
+    canonical = _canonical_cost_usd()
+    try:
+        state["cost_usd"] = canonical
+    except Exception:
+        pass
+    return canonical
+
+def _assert_cost_aligned(state: dict, where: str = "") -> float:
+    """Read site guard: returns canonical cost, warns if state mirror drifted."""
+    canonical = _canonical_cost_usd()
+    try:
+        state_cost = float(state.get("cost_usd", 0) or 0)
+        if abs(state_cost - canonical) > _COST_EPSILON_USD:
+            print(f"  ⚠️  cost telemetry drift at {where or '?'}: "
+                  f"state.cost_usd=${state_cost:.4f} vs _run_costs.total_usd=${canonical:.4f} "
+                  f"(epsilon=${_COST_EPSILON_USD}). Using canonical.")
+    except Exception:
+        pass
+    # Self-heal the mirror so downstream reads converge.
+    try:
+        state["cost_usd"] = canonical
+    except Exception:
+        pass
+    return canonical
 
 
 def save_cost_report(run_name: str):
@@ -467,7 +528,7 @@ def wiki_ingest(state: dict, decision: str, feedback: str):
     ranking = state.get("ranking", [])
     approaches = state.get("approaches", [])
     builds = state.get("builds", [])
-    cost = state.get("cost_usd", 0)
+    cost = _assert_cost_aligned(state, where="wiki_ingest")
     iteration = state.get("iteration", 0)
     design_system = "SMPLX" if state.get("design_system") else "none"
     
@@ -906,6 +967,7 @@ def apply_missing_asset_fallbacks(html_path: Path, missing_refs: list[str]) -> i
 # Reserve 35K tokens for output, use the rest for input.
 MODEL_CONTEXT_WINDOWS = {
     "claude-opus": 200000,
+    "claude-sonnet": 200000,
     "gpt-5.4": 128000,
     "gpt-4.1": 128000,
     "gpt-4o": 128000,
@@ -1121,13 +1183,24 @@ def check_spec_compliance(html_path: Path, contract: str) -> dict:
     return results
 
 
-def check_design_system_compliance(html_path: Path, design_system: str) -> dict:
+def check_design_system_compliance(html_path: Path, design_system: str,
+                                   screen_overrides: Optional[dict] = None) -> dict:
     """Check built HTML against a design system's token constraints.
     
     Parses the design system markdown to extract:
     - Allowed fonts (font-family values)
     - Allowed color palette (hex values)
     Then scans the HTML for violations.
+
+    If `screen_overrides` is a non-empty dict of
+    {screen_id: {"fonts_allowed": [...], "colors_allowed": [...]}} (as produced
+    by scope_contract_node from a brief's per-screen treatment table), the
+    allowlist is UNION-expanded with every override entry. This is the simple,
+    low-risk fix for briefs that explicitly authorize off-SMPLX tokens on
+    specific screens (e.g. dark-mode retro-arcade screen): rather than
+    detecting which screen each HTML node belongs to, we accept any
+    brief-authorized font/color anywhere in the build. Per-screen detection
+    is a follow-up.
     """
     import re
     if not html_path.exists():
@@ -1153,6 +1226,33 @@ def check_design_system_compliance(html_path: Path, design_system: str) -> dict:
         allowed_colors.add(match.lower())
     # Always allow pure black/white and near variants
     allowed_colors.update({"#000000", "#ffffff"})
+
+    # UNION-merge brief-authorized per-screen overrides (TASK 0 fix).
+    # Empty/missing overrides → strict SMPLX behavior unchanged (backward compat).
+    override_fonts: set = set()
+    override_colors: set = set()
+    if screen_overrides:
+        try:
+            for _screen_id, entry in screen_overrides.items():
+                if not isinstance(entry, dict):
+                    continue
+                for f in (entry.get("fonts_allowed") or []):
+                    if isinstance(f, str) and f.strip():
+                        override_fonts.add(f.strip().lower())
+                for c in (entry.get("colors_allowed") or []):
+                    if isinstance(c, str):
+                        m = re.match(r'#?[0-9a-fA-F]{6}', c.strip())
+                        if m:
+                            v = m.group(0).lower()
+                            if not v.startswith("#"):
+                                v = "#" + v
+                            override_colors.add(v)
+        except Exception:
+            pass
+        if override_fonts:
+            allowed_fonts |= override_fonts
+        if override_colors:
+            allowed_colors |= override_colors
     
     # Check fonts used in HTML
     if allowed_fonts:
@@ -1264,6 +1364,7 @@ def estimate_cost(model: str, input_tokens: int, output_tokens: int) -> float:
     rates = {
         "claude-opus-4-6": (15.0, 75.0),      # per 1M tokens (in, out)
         "claude-opus-4-7": (15.0, 75.0),
+        "claude-sonnet-4-5": (3.0, 15.0),
         "gpt-5": (3.0, 15.0),                  # GPT-5.5 pricing
         "gpt-5.4": (2.50, 10.0),
         "gpt-5.5": (3.0, 15.0),
@@ -1277,6 +1378,138 @@ def estimate_cost(model: str, input_tokens: int, output_tokens: int) -> float:
 
 
 # ── Pipeline Nodes ──────────────────────────────────────────────
+
+
+def _extract_screen_overrides_from_brief(brief: str) -> dict:
+    """Parse a brief's per-screen treatment table (if present) and return
+    {screen_id: {"fonts_allowed": [...], "colors_allowed": [...]}}.
+
+    Looks for a markdown table whose header row mentions "Screen" and at
+    least one of {"tokens", "textures", "design system", "treatment"}. For
+    each data row, extracts:
+      - font family names from backticks where the backtick content is NOT
+        a hex color and NOT a SMPLX-style token path (contains '/'). E.g.
+        `DSEG7-Classic`, `Press Start 2P`, `Inter Bold 22–28px`.
+      - hex colors (#RRGGBB) anywhere in the row.
+    Screen id is taken from the first column (cleaned).
+
+    Returns {} if no table is found or no overrides can be extracted.
+    This is best-effort: a brief that doesn't carry such a table gets {}
+    and the QA check falls back to strict SMPLX behavior.
+    """
+    import re
+    if not brief or "|" not in brief:
+        return {}
+
+    lines = brief.split("\n")
+    overrides: dict = {}
+    in_table = False
+    header_cols: list = []
+
+    def _parse_row(row: str) -> list:
+        # Strip leading/trailing pipe + split. Keep cell whitespace.
+        s = row.strip()
+        if s.startswith("|"):
+            s = s[1:]
+        if s.endswith("|"):
+            s = s[:-1]
+        return [c.strip() for c in s.split("|")]
+
+    for raw in lines:
+        line = raw.rstrip()
+        stripped = line.strip()
+        if not stripped.startswith("|"):
+            if in_table:
+                # table ended
+                in_table = False
+                header_cols = []
+            continue
+
+        cells = _parse_row(line)
+        lower_cells = [c.lower() for c in cells]
+
+        # Detect header row
+        if not in_table:
+            if any("screen" in c for c in lower_cells) and any(
+                k in c for c in lower_cells for k in ("token", "texture", "design system", "treatment")
+            ):
+                in_table = True
+                header_cols = lower_cells
+            continue
+
+        # Skip alignment row like |---|---|
+        if all(set(c) <= set("-: ") for c in cells):
+            continue
+
+        if len(cells) < 2:
+            continue
+
+        screen_id = cells[0].strip()
+        if not screen_id:
+            continue
+        # Normalize: strip leading numbering like "1." or "1. Intro / arena entry"
+        screen_id = re.sub(r"\*\*", "", screen_id).strip()
+
+        row_text = " ".join(cells[1:])
+
+        # Hex colors
+        colors = sorted({m.lower() for m in re.findall(r"#[0-9a-fA-F]{6}", row_text)})
+
+        # Backtick tokens — strip SMPLX path tokens (contain '/') and hex; keep font-family-ish
+        backticks = re.findall(r"`([^`]+)`", row_text)
+        fonts: set = set()
+        FONT_HINTS = (
+            "dseg", "press start", "inter", "mono", "sans", "serif", "pixel",
+            "arcade", "vt323", "ibm plex", "jetbrains", "roboto",
+        )
+        # Known font family patterns. Brief writers often put fonts in plain
+        # prose or parentheses, not backticks (e.g. "(DSEG7-Classic, 96-144px)"
+        # or "Press Start 2P, 10px"). Match common families directly.
+        FONT_PATTERNS = [
+            (r"\bDSEG7-Classic\b", "dseg7-classic"),
+            (r"\bDSEG14-Classic\b", "dseg14-classic"),
+            (r"\bPress Start 2P\b", "press start 2p"),
+            (r"\bVT323\b", "vt323"),
+            (r"\bIBM Plex(?:\s+(?:Sans|Mono|Serif))?\b", None),  # use match text lowered
+            (r"\bJetBrains Mono\b", "jetbrains mono"),
+            (r"\bRoboto(?:\s+(?:Mono|Slab|Condensed))?\b", None),
+            (r"\bInter\b", "inter"),
+        ]
+        for pat, canon in FONT_PATTERNS:
+            for m in re.findall(pat, row_text):
+                fonts.add(canon if canon else m.lower())
+
+        for tok in backticks:
+            t = tok.strip()
+            if not t:
+                continue
+            if t.startswith("#") and re.match(r"^#[0-9a-fA-F]{6}$", t):
+                continue
+            if "/" in t:
+                # SMPLX token path like `Background/B1` or `Heading/32pt/Semi Bold`
+                continue
+            tl = t.lower()
+            if any(h in tl for h in FONT_HINTS):
+                # Trim trailing weight/size specifiers ("Inter Bold 22–28px" -> "Inter")
+                # Take the leading run of letters/digits/space/hyphen until the first
+                # numeric size or px/pt marker.
+                core = re.split(r"\s+\d|\s+bold\b|\s+regular\b|\s+semi\b|\s+light\b|\s+medium\b|\s+black\b|\s+thin\b|\s+italic\b|,", tl, maxsplit=1)[0]
+                core = core.strip().rstrip(",")
+                if core:
+                    fonts.add(core)
+
+        if fonts or colors:
+            entry = overrides.setdefault(screen_id, {"fonts_allowed": [], "colors_allowed": []})
+            # merge unique, preserve order roughly
+            for f in sorted(fonts):
+                if f not in entry["fonts_allowed"]:
+                    entry["fonts_allowed"].append(f)
+            for c in colors:
+                if c not in entry["colors_allowed"]:
+                    entry["colors_allowed"].append(c)
+
+    return overrides
+
 
 @_supervised("scope_contract")
 def scope_contract_node(state: PipelineState) -> dict:
@@ -1389,6 +1622,21 @@ def scope_contract_node(state: PipelineState) -> dict:
 
     # Persist for human inspection + audit
     import json as _json
+
+    # TASK 0 fix: extract per-screen brief-authorized fonts/colors from the
+    # "treatment table" (markdown) if present, so QA's design-system check can
+    # honor brief-mandated off-SMPLX tokens (e.g. dark-mode retro-arcade screens
+    # naming DSEG7-Classic + chromatic palette). UNION allowlist — see
+    # check_design_system_compliance docstring. Deterministic regex pass — no
+    # extra LLM call. Empty result => strict-SMPLX behavior unchanged.
+    try:
+        contract_json["screen_overrides"] = _extract_screen_overrides_from_brief(
+            state.get("brief", "") or ""
+        )
+    except Exception as _e:
+        contract_json["screen_overrides"] = {}
+        contract_json.setdefault("_screen_overrides_error", str(_e))
+
     contract_path = run_dir / "scope-contract.json"
     contract_path.write_text(_json.dumps(contract_json, indent=2))
     print(f"  📋 scope contract: artifact_type={contract_json.get('artifact_type')}, "
@@ -1609,7 +1857,7 @@ Your final selection must include references from AT LEAST 3 of these visual app
         "moodboard": [str(f) for f in moodboard_files],
         "diversification_axes": diversification_axes,
         "phase": "research_complete",
-        "cost_usd": state.get("cost_usd", 0) + 0.50,  # estimated
+        "cost_usd": _canonical_cost_usd(),  # canonical: mirror _run_costs.total_usd (was a fake +$0.50 estimate)
     }
     tracer.end_span(span, output={
         "status": result["status"],
@@ -2266,6 +2514,97 @@ def extract_asset_manifest(approach_content: str) -> list:
     return assets
 
 
+def extract_asset_usage_plan(approach_content: str) -> dict:
+    """Parse ASSET USAGE PLAN section from approach doc.
+
+    Returns dict {slug: {"screens": str, "role": str|None, "placement": str, "treatment": str}}.
+
+    The role field is normalized to one of {hero, background, chrome, icon, accent}
+    or None when malformed. Slug is normalized to match extract_asset_manifest()
+    (lowercase, spaces → hyphens, slashes → hyphens).
+
+    Matches a flexible set of heading formats:
+    - `## ASSET USAGE PLAN`
+    - `## 10. ASSET USAGE PLAN`
+    - `## ASSET USAGE PLAN (REQUIRED)`
+    Returns {} if heading absent (legacy approach docs — backward-compatible).
+    """
+    import re as _re
+
+    VALID_ROLES = {"hero", "background", "chrome", "icon", "accent"}
+
+    heading_re = _re.compile(
+        r"^##\s*(?:\d+\.\s*)?ASSET\s+USAGE\s+PLAN.*$",
+        _re.IGNORECASE | _re.MULTILINE,
+    )
+    match = heading_re.search(approach_content)
+    if not match:
+        # backward-compat: legacy approach docs without ASSET USAGE PLAN return {}
+        return {}
+
+    section_text = approach_content[match.end():]
+    next_heading = _re.search(r"^##\s+\S", section_text, _re.MULTILINE)
+    if next_heading:
+        section_text = section_text[: next_heading.start()]
+
+    plan: dict = {}
+    for raw_line in section_text.split("\n"):
+        line = raw_line.strip()
+        if not line.startswith("|") or not line.endswith("|"):
+            continue
+        # Split markdown table cells; drop the leading/trailing empty strings.
+        cells = [c.strip() for c in line.strip("|").split("|")]
+        if len(cells) < 5:
+            continue
+        # Skip the separator row (`|---|---|...`).
+        if all(_re.fullmatch(r":?-{2,}:?", c or "") for c in cells if c):
+            continue
+        # Skip the header row — detected by literal "asset slug" / "slug" content.
+        header_first = cells[0].lower()
+        if "asset slug" in header_first or header_first == "slug":
+            continue
+
+        slug_raw, screens, role_raw, placement, treatment = cells[0], cells[1], cells[2], cells[3], cells[4]
+        if not slug_raw:
+            continue
+        slug = slug_raw.lower().replace(" ", "-").replace("/", "-")
+        role = role_raw.lower().strip() if role_raw else ""
+        if role not in VALID_ROLES:
+            # Log warn and store as None — keep row so builder still gets placement/treatment.
+            print(f"    [asset-usage-plan] WARN: slug={slug!r} has invalid role={role_raw!r}; using None")
+            role = None
+        plan[slug] = {
+            "screens": screens,
+            "role": role,
+            "placement": placement,
+            "treatment": treatment,
+        }
+    return plan
+
+
+def _role_rules_block(any_usage_plan: bool) -> str:
+    """D3: emit MANDATORY ASSET USAGE RULES 5-7 only when the approach doc supplied
+    a usage plan. backward-compat: legacy approach docs without ASSET USAGE PLAN
+    fall back to rules 1-4 only — this returns an empty string in that case."""
+    if not any_usage_plan:
+        return ""
+    return """
+5. **Hero-role assets MUST appear at scale ≥1.0 and occupy ≥20% of their screen's area.**
+   Render via `<img>` at intrinsic or larger size, or `background-image` at `cover` /
+   explicit ≥20% dimensions. Do NOT shrink hero assets into icon-sized chips. The hero
+   IS the focal element of the screen.
+
+6. **Background-role assets MUST be full-bleed or cover ≥50% of the screen.** Use
+   `background-size: cover` on the screen container, or `<img>` at 100% width spanning
+   the viewport. Treating a background-role asset as a decorative thumbnail = rejection.
+
+7. **Do NOT subordinate hero assets to CSS-drawn elements.** The asset IS the
+   centerpiece — CSS gradients, divs, or shapes must be supporting, not replacing,
+   the hero asset. If the role table says hero, the asset is bigger than the CSS chrome
+   around it.
+"""
+
+
 def route_asset_model(asset: dict) -> str:
     """Route asset to best fal.ai model based on type and optional hint."""
     if asset.get("model_hint"):
@@ -2348,7 +2687,13 @@ def asset_gen_node(state: PipelineState) -> dict:
         
         designer_id = approach["designer_id"]
         manifest = extract_asset_manifest(approach["content"])
-        
+        # D2: parse the ASSET USAGE PLAN section and attach role/placement metadata
+        # per asset slug. Returns {} for legacy approach docs without the new section
+        # (backward-compat: legacy approach docs without ASSET USAGE PLAN).
+        usage_plan = extract_asset_usage_plan(approach["content"])
+        for asset in manifest:
+            asset["usage_plan"] = usage_plan.get(asset["name"])  # None when slug has no row
+
         if not manifest:
             print(f"  [asset-gen] Designer {designer_id}: no asset manifest — skipping")
             all_assets[designer_id] = []
@@ -2365,6 +2710,10 @@ def asset_gen_node(state: PipelineState) -> dict:
             result = generate_asset(asset, fal_key)
             if not result:
                 continue
+            # D2 (REVISION B): propagate usage_plan from parsed manifest item into
+            # the generated record. Without this, manifest.json (which the builder
+            # reads back) loses the role/placement/treatment metadata.
+            result["usage_plan"] = asset.get("usage_plan")
             
             # Download image to local file
             try:
@@ -2431,7 +2780,7 @@ def fan_out_builders(state: PipelineState) -> list:
     initial-build path. The companion playability fan-out (fan_out_playability_mode)
     sets builder_mode="playability" instead.
     """
-    model_assignments = ["claude-opus", "gpt-5", "gemini-pro-latest"]  # frontier-only; gemini-pro-latest auto-tracks Google's latest Pro
+    model_assignments = ["claude-sonnet", "gpt-5", "gemini-pro-latest"]  # Builder: Sonnet for Claude branch (2026-06-13 policy change); GPT-5 + Gemini stay frontier for model diversity
     builders = []
     for i in range(len(state["approaches"])):
         model = model_assignments[i % len(model_assignments)]
@@ -2673,6 +3022,7 @@ The following moodboard images are at: {moodboard_dir}
         # Builder gets asset names + placeholder markers
         # Post-processing replaces markers with base64 data URIs (avoids context bloat)
         asset_ref_block = ""
+        any_usage_plan = False  # D3: track whether any asset has a usage plan, to gate rules 5-7
         manifest_path = assets_dir / "manifest.json"
         if manifest_path.exists():
             asset_list = json.loads(manifest_path.read_text())
@@ -2680,6 +3030,16 @@ The following moodboard images are at: {moodboard_dir}
                 name = a["name"]
                 asset_ref_block += f"\n### {name} ({a.get('type','')}, {a.get('width','')}×{a.get('height','')})\n"
                 asset_ref_block += f"- Description: {a.get('prompt', '')[:150]}\n"
+                # D3: emit deployment line ONLY when usage_plan is present for this asset.
+                # backward-compat: legacy approach docs without ASSET USAGE PLAN skip this line.
+                up = a.get("usage_plan")
+                if up:
+                    any_usage_plan = True
+                    role_str = up.get("role") or "unspecified"
+                    asset_ref_block += (
+                        f"- **Role: {role_str} | Screen: {up.get('screens','')} | "
+                        f"Placement: {up.get('placement','')} | Treatment: {up.get('treatment','')}**\n"
+                    )
                 asset_ref_block += f"- Use in HTML: `<img src=\"asset://{name}\" />` or `background-image: url('asset://{name}');`\n"
                 asset_ref_block += f"- The `asset://` prefix will be automatically replaced with the real image data after build.\n"
 
@@ -2715,7 +3075,7 @@ Do NOT try to base64-encode images yourself — just use `asset://name` referenc
 4. **You are NOT permitted to substitute CSS-drawn equivalents for commissioned assets.** If
    an asset exists for it, use the asset. The fal.ai-generated image is always higher fidelity
    than CSS you can write in this time budget.
-
+{_role_rules_block(any_usage_plan)}
 The full asset-reference contract (allowed slugs, font/external-URL rules) is emitted below as
 `## HARD ASSET CONSTRAINT` — follow it exactly.
 """
@@ -2921,6 +3281,16 @@ Save to: {run_dir}/builds/{concept_name}.html
         html_content = build_path.read_text()
         manifest_path = assets_dir / "manifest.json"
         if manifest_path.exists() and "asset://" in html_content:
+            # D4 prep: snapshot the pre-injection HTML so the role-compliance QA
+            # heuristic can measure declared width/height of `asset://<slug>`
+            # references. After this block runs, asset:// refs are replaced with
+            # base64 data URIs and the slug→element mapping is lost.
+            try:
+                pre_inj_snapshot = run_dir / "builds" / f"concept-{idx}.pre-inject.html"
+                pre_inj_snapshot.parent.mkdir(parents=True, exist_ok=True)
+                pre_inj_snapshot.write_text(html_content)
+            except Exception:
+                pass
             asset_list = json.loads(manifest_path.read_text())
             replacements = 0
             for a in asset_list:
@@ -3299,7 +3669,11 @@ def qa_station_node(state: PipelineState) -> dict:
         
         # ── DESIGN SYSTEM COMPLIANCE CHECK ──
         if state.get("design_system"):
-            ds_result = check_design_system_compliance(build_path, state["design_system"])
+            _scope = state.get("scope_contract") or {}
+            _overrides = _scope.get("screen_overrides") if isinstance(_scope, dict) else None
+            ds_result = check_design_system_compliance(
+                build_path, state["design_system"], screen_overrides=_overrides
+            )
             report["source_checks"]["design_system"] = ds_result
             if not ds_result["pass"]:
                 for v in ds_result["violations"]:
@@ -4596,7 +4970,21 @@ def _post_patch_asset_hygiene(
             try:
                 sidecar = run_dir / "builds" / f"concept-{concept_idx}-asset-validation.json"
                 sidecar.parent.mkdir(parents=True, exist_ok=True)
-                sidecar.write_text(json.dumps(pre_sub_validation, indent=2, default=str))
+                # Bug B fix (2026-05-16): if the post-patch HTML has no
+                # `asset://` references left to scan (both matched and missing
+                # are empty), the scan is meaningless — all refs have already
+                # been substituted to base64 data URIs by a previous injector
+                # pass. Overwriting the sidecar with this empty result causes
+                # downstream QA to report 0% asset utilization and trigger a
+                # patch loop that can't fix anything. Preserve the prior
+                # sidecar value in that case.
+                _matched = pre_sub_validation.get("matched") or []
+                _missing = pre_sub_validation.get("missing") or []
+                if not _matched and not _missing and sidecar.exists():
+                    print(f"  [{phase_label}/asset-hygiene] preserving prior sidecar "
+                          f"(post-patch HTML has no asset:// refs to scan)")
+                else:
+                    sidecar.write_text(json.dumps(pre_sub_validation, indent=2, default=str))
             except Exception:
                 pass
         except Exception:
@@ -5526,6 +5914,124 @@ def _run_qa_checks_for_build(build: dict, state: PipelineState,
     report["source_checks"]["spec_compliance"] = build.get("compliance", {})
     report["source_checks"]["asset_validation"] = asset_val
 
+    # D4: asset_role_compliance — informational check (does NOT gate verdict)
+    # Source of truth for "was the hero slug referenced?": the sidecar's
+    # `matched` list (pre-injection truth). To measure rendered dimensions,
+    # we read the optional pre-injection snapshot written by builder_node
+    # (concept-{idx}.pre-inject.html). If neither manifest nor snapshot is
+    # available, we emit pass=None rather than a false positive.
+    # backward-compat: legacy approach docs without ASSET USAGE PLAN produce
+    # manifests with usage_plan=None per asset; the loop below skips them and
+    # asset_role_compliance is omitted entirely.
+    try:
+        run_dir_qa = RUNS_DIR / state["name"]
+        manifest_p = run_dir_qa / "assets" / f"concept-{idx}" / "manifest.json"
+        if manifest_p.exists():
+            manifest_assets = json.loads(manifest_p.read_text())
+            hero_slugs = [a for a in manifest_assets
+                          if (a.get("usage_plan") or {}).get("role") == "hero"]
+            if hero_slugs:
+                matched_set = set(asset_val.get("matched") or [])
+                pre_inj_path = run_dir_qa / "builds" / f"concept-{idx}.pre-inject.html"
+                pre_inj_html = pre_inj_path.read_text(errors="ignore") if pre_inj_path.exists() else None
+
+                warnings: list = []
+                determinable = True
+                # Viewport per brief's viewport_constraint = 390×844 mobile.
+                # NOTE: Playwright screenshots use 1080×1920 for QA capture, but the
+                # design contract sets 390×844 as the target render viewport. Use
+                # that as the area denominator so the threshold math reflects what
+                # the user actually sees on-device.
+                VW, VH = 390, 844
+                viewport_area = VW * VH
+                THRESHOLD = 0.20  # ≥20% of viewport area
+
+                for a in hero_slugs:
+                    slug = a["name"]
+                    # Was it referenced at all? Use sidecar matched list (pre-injection truth).
+                    if slug not in matched_set:
+                        warnings.append({
+                            "slug": slug,
+                            "expected_role": "hero",
+                            "issue": "hero-role slug not referenced anywhere in HTML (sidecar.matched check)",
+                        })
+                        continue
+                    # Was it rendered at ≥20% viewport area? Need pre-injection snapshot.
+                    if pre_inj_html is None:
+                        determinable = False
+                        continue
+                    # Find <img src="asset://{slug}..."> tag and read declared dims.
+                    # Allow slug with optional extension.
+                    import re as _re
+                    tag_re = _re.compile(
+                        rf"<img\b[^>]*\bsrc\s*=\s*[\"']asset://{_re.escape(slug)}(?:\.\w+)?[\"'][^>]*>",
+                        _re.IGNORECASE,
+                    )
+                    m = tag_re.search(pre_inj_html)
+                    if not m:
+                        # asset may be used as background-image; we can't reliably
+                        # measure those without a renderer. Mark indeterminate.
+                        determinable = False
+                        continue
+                    tag = m.group(0)
+                    w_m = _re.search(r'\bwidth\s*=\s*["\']?(\d+)', tag, _re.IGNORECASE)
+                    h_m = _re.search(r'\bheight\s*=\s*["\']?(\d+)', tag, _re.IGNORECASE)
+                    style_m = _re.search(r'\bstyle\s*=\s*["\']([^"\']*)["\']', tag, _re.IGNORECASE)
+                    width = int(w_m.group(1)) if w_m else None
+                    height = int(h_m.group(1)) if h_m else None
+                    if style_m:
+                        style = style_m.group(1)
+                        if width is None:
+                            sw = _re.search(r"\bwidth\s*:\s*(\d+)\s*px", style, _re.IGNORECASE)
+                            if sw:
+                                width = int(sw.group(1))
+                        if height is None:
+                            sh = _re.search(r"\bheight\s*:\s*(\d+)\s*px", style, _re.IGNORECASE)
+                            if sh:
+                                height = int(sh.group(1))
+                    if width is None or height is None:
+                        determinable = False
+                        continue
+                    # Use AREA math (width × height) not width-OR-height, per
+                    # REVISION A: width-OR-height can false-pass tiny-but-tall
+                    # or wide-but-short assets against ≥20% area requirement.
+                    asset_area = width * height
+                    area_ratio = asset_area / viewport_area
+                    if area_ratio < THRESHOLD:
+                        warnings.append({
+                            "slug": slug,
+                            "expected_role": "hero",
+                            "declared_width": width,
+                            "declared_height": height,
+                            "area_ratio": round(area_ratio, 3),
+                            "issue": (
+                                f"hero asset rendered at {width}×{height}px = "
+                                f"{area_ratio*100:.1f}% of 390×844 viewport area "
+                                f"(threshold: ≥{int(THRESHOLD*100)}%)"
+                            ),
+                        })
+
+                if not determinable and not warnings:
+                    # Couldn't measure at all — DO NOT silently pass.
+                    report["asset_role_compliance"] = {
+                        "pass": None,
+                        "note": "could not determine — pre-injection snapshot or slug mapping unavailable",
+                        "warnings": [],
+                    }
+                else:
+                    report["asset_role_compliance"] = {
+                        "pass": len(warnings) == 0,
+                        "warnings": warnings,
+                        "note": "informational — does not affect verdict",
+                    }
+    except Exception as _arc_e:
+        # Defensive: don't let a heuristic bug break QA.
+        report["asset_role_compliance"] = {
+            "pass": None,
+            "note": f"heuristic error (non-fatal): {_arc_e}",
+            "warnings": [],
+        }
+
     # Asset utilization check: builders must use the commissioned assets, not
     # just reference a token few. If >20% of assets sit unused, flag for the
     # patcher to integrate them. (Was previously only logged as 'wasted spend'.)
@@ -5551,7 +6057,11 @@ def _run_qa_checks_for_build(build: dict, state: PipelineState,
             )
 
     if state.get("design_system"):
-        ds_result = check_design_system_compliance(build_path, state["design_system"])
+        _scope = state.get("scope_contract") or {}
+        _overrides = _scope.get("screen_overrides") if isinstance(_scope, dict) else None
+        ds_result = check_design_system_compliance(
+            build_path, state["design_system"], screen_overrides=_overrides
+        )
         report["source_checks"]["design_system"] = ds_result
         if not ds_result["pass"]:
             for v in ds_result["violations"]:
@@ -6613,10 +7123,26 @@ def polish_loop_node(state: PipelineState, loop_type: str) -> dict:
         "cost_circuit_broken": cost_broken_now,
     }
     # Mirror to legacy qa_reports list so existing eval-app readers keep working
-    # while the unified flag is on. (Legacy qa_*/judge_* fields stay empty under
-    # the unified path — only the list mirror is kept for back-compat.)
+    # while the unified flag is on.
+    #
+    # Bug A fix (2026-05-16): downstream consumers (pairwise_rank_node,
+    # _builder_qa_fix_run) still read legacy per-concept fields. Mirror the
+    # full per-concept dicts ONCE here at the single emission point — do NOT
+    # propagate mirror writes through other nodes (that creates the divergence
+    # pattern this is meant to fix).
     if loop_type == "qa":
         out["qa_reports"] = legacy_qa_reports_list
+        out["qa_reports_by_concept"] = new_reports
+        out["qa_status"] = new_status
+        out["qa_iterations"] = new_iters
+    else:  # judge
+        out["judge_status"] = new_status
+        out["judge_iterations"] = new_iters
+        # judge_scores expects per-concept score dicts, not full reports.
+        out["judge_scores"] = {
+            idx: (rep.get("scores") if isinstance(rep, dict) else {}) or {}
+            for idx, rep in new_reports.items()
+        }
     try:
         _sup_emit("phase_complete", phase=_polish_phase, loop_type=loop_type,
                   elapsed_s=int(time.time() - _polish_t0),
@@ -7601,7 +8127,7 @@ def wiki_ingest_structured(state: dict, verdict_data: dict):
     overall_note = verdict_data.get("overall_note", "")
     concepts = verdict_data.get("concepts", [])
     ranking = state.get("ranking", [])
-    cost = state.get("cost_usd", 0)
+    cost = _assert_cost_aligned(state, where="wiki_ingest_verdict")
     iteration = state.get("iteration", 0)
     design_system = "SMPLX" if state.get("design_system") else "none"
     
@@ -8140,7 +8666,7 @@ def _emit_crash_page(state: dict, verdict: str,
 
         # Compute fields
         ts_iso = time.strftime("%Y-%m-%dT%H:%M:%S%z") or time.strftime("%Y-%m-%dT%H:%M:%S")
-        total_cost = state.get("cost_usd", 0) or 0
+        total_cost = _assert_cost_aligned(state, where="crash_page")
         last_phase = _detect_last_phase(log_text_for_detect)
         last_node = _detect_last_node(log_text_for_detect)
         symptom = _classify_crash_symptom(verdict, exc_info, log_text_for_detect, state)
@@ -8869,7 +9395,7 @@ def main():
             print(f"Iteration: {s.get('iteration', 0)}")
             print(f"Approaches: {len(s.get('approaches', []))}")
             print(f"Builds: {len(s.get('builds', []))}")
-            print(f"Cost: ${s.get('cost_usd', 0):.2f}")
+            print(f"Cost: ${_assert_cost_aligned(s, where='cli_status'):.2f}")
             print(f"Human decision: {s.get('human_decision', 'pending')}")
             
             if state.next:
