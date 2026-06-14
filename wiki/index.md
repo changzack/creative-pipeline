@@ -26,6 +26,14 @@ Last updated: 2026-05-13
 - [Experience Walker](builds/experience-walker.md) — journey-aware judging, dead/inert prototype detection (added 2026-05-13)
 
 ## Run Summaries
+- [quiz-wars-bold-unified-20260520-v3](runs/quiz-wars-bold-unified-20260520-v3.md) — completed
+- [quiz-wars-bold-unified-20260516-135130](runs/quiz-wars-bold-unified-20260516-135130.md) — killed
+- [quiz-wars-bold-unified-20260516-134441-v2](runs/quiz-wars-bold-unified-20260516-134441-v2.md) — completed
+- [quiz-wars-bold-unified-20260516-134441](runs/quiz-wars-bold-unified-20260516-134441.md) — killed
+- [quiz-wars-bold-unified-20260516-111715](runs/quiz-wars-bold-unified-20260516-111715.md) — completed
+- [quiz-wars-bold-20260516-105233](runs/quiz-wars-bold-20260516-105233.md) — killed
+- [unified-polish-smoke2-20260516-083010](runs/unified-polish-smoke2-20260516-083010.md) — killed
+- [unified-polish-smoke-20260516-072651](runs/unified-polish-smoke-20260516-072651.md) — killed
 _(backfill in progress)_
 
 ## Meta

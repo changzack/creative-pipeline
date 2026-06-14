@@ -35,3 +35,6 @@
 - Window: 128K tokens (~363KB text)
 - Typical builder prompt: 62-94KB (17-26% utilization)
 - Safe zone: adequate for current prompt sizes
+| quiz-wars-bold-unified-20260516-111715 | Builder 1 | #2 (0 wins) | completed | auto-ingested |
+| quiz-wars-bold-unified-20260516-134441-v2 | Builder 1 | #2 (0 wins) | completed | auto-ingested |
+| quiz-wars-bold-unified-20260520-v3 | Builder 1 | #2 (0 wins) | completed | auto-ingested |

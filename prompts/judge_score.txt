@@ -51,7 +51,7 @@ Respond with VALID JSON in the schema below. No markdown fences, no prose before
     "hierarchy_readability": <0.0-10.0>
   },
   "weighted_total": <0.0-10.0>,
-  "weighted_total_breakdown": "<formula showing how you computed it, e.g. 'CA 7×0.30 + AS 9×0.20 + BF 8×0.20 + VD 6×0.10 + DIST 7×0.10 + TY 5×0.05 + HR 6×0.05 = 7.15'>",
+  "weighted_total_breakdown": "<formula showing how you computed it, e.g. 'CA 7×0.30 + BF 8×0.20 + VD 6×0.10 + DIST 7×0.05 + TY 5×0.12 + HR 6×0.13 = 6.31'>",
   "priority_fixes": {
     "p0_broken": ["<concrete actionable fix>"],
     "p1_must_fix": ["<concrete actionable fix>"],
@@ -64,26 +64,28 @@ Respond with VALID JSON in the schema below. No markdown fences, no prose before
 
 ## Weights (must match the persona — included here for redundancy)
 
-Use these EXACT weights when computing `weighted_total`:
-
-- Creative Ambition: 0.40
-- AI Slop Check: 0.20
-- Visual Depth: 0.15
-- Typography: 0.10
-- Hierarchy & Readability: 0.10
-- Technical Execution: 0.05
-
-If you see `brief_fit` and `distinctiveness` in the persona's Calibrated Scoring Weights table (proposed version), use those weights instead:
+Use these EXACT weights when computing `weighted_total` (Bundle B rebalance, activated 2026-05-16):
 
 - Creative Ambition: 0.30
-- AI Slop Check: 0.20
 - Brief Fit: 0.20
 - Visual Depth: 0.10
-- Distinctiveness: 0.10
-- Typography: 0.05
-- Hierarchy & Readability: 0.05
+- Distinctiveness: 0.05
+- Typography: 0.12
+- Hierarchy & Readability: 0.13
 
-Pick ONE weighting scheme based on what the persona above describes, and use it consistently. Always include all 7 score fields in the JSON output (even if a dimension's weight is 0 in the active scheme — score it anyway for diagnostic value).
+The 6 scored dimensions sum to **0.90**, so the maximum possible `weighted_total` is 9.0
+(not 10.0). The 7.0 pass threshold is preserved — clearing 7.0 / 9.0 = ~78% of max.
+
+**AI Slop is NOT weighted into the total.** It is a hard cap: if `ai_slop_flagged == true`,
+clamp `weighted_total` to ≤4.0 regardless of category scores.
+
+**Technical Execution is NOT weighted into the total.** It is a binary gate: if
+`renders_and_runs == false`, clamp `weighted_total` to ≤3.0 regardless of category scores.
+
+Always include all 7 score fields in the JSON output (creative_ambition, ai_slop_check,
+brief_fit, visual_depth, distinctiveness, typography, hierarchy_readability) — even
+though ai_slop_check is not in the weighted formula, the score is still useful diagnostic
+data.
 
 ## Hard pass/fail rules
 

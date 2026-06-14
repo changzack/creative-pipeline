@@ -319,11 +319,13 @@ const RUN_NAME = "{run_name}";
 const TECH_STATES = ['', 'landed', 'standout', 'partial', 'missed'];
 const TECH_ICONS = {{'': '○', 'landed': '✅', 'standout': '🔥', 'partial': '⚠️', 'missed': '❌'}};
 const DIMS = [
-  {{ key: 'creative_ambition', label: 'Creative Ambition', weight: '40%' }},
-  {{ key: 'ai_slop', label: 'AI Slop Check (5=no slop)', weight: '20%' }},
-  {{ key: 'visual_depth', label: 'Visual Depth', weight: '15%' }},
-  {{ key: 'typography', label: 'Typography', weight: '10%' }},
-  {{ key: 'hierarchy', label: 'Hierarchy', weight: '10%' }},
+  {{ key: 'creative_ambition', label: 'Creative Ambition', weight: '30%' }},
+  {{ key: 'ai_slop', label: 'AI Slop Check (hardcap)', weight: '—' }},
+  {{ key: 'brief_fit', label: 'Brief Fit', weight: '20%' }},
+  {{ key: 'visual_depth', label: 'Visual Depth', weight: '10%' }},
+  {{ key: 'distinctiveness', label: 'Distinctiveness', weight: '5%' }},
+  {{ key: 'typography', label: 'Typography', weight: '12%' }},
+  {{ key: 'hierarchy', label: 'Hierarchy', weight: '13%' }},
 ];
 
 let currentIdx = 0;

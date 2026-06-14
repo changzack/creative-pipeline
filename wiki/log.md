@@ -42,3 +42,58 @@ Refactor: `builder_node` is now dual-mode (`builder_mode == "initial" | "playabi
 
 ## [2026-05-13] build | three-bugs-fix
 Fixed three pipeline bugs from sneaker-game-v1 retro: (A) per-brief diversification axes via Claude Opus call at end of research_node, replacing hardcoded share-card-shaped eras; (B) two-tier wiki context (global-taste-rules.md + per-brief LEARNINGS.md sibling) cuts injected context from 8K → 1.6K chars and ends cross-brief contamination; (C) post-build asset:// validation with SVG fallback + NEEDED_ASSETS.md surfacing. Backup: pipeline.py.before-three-bugs-fix. See builds/three-bugs-2026-05-13.md.
+
+## [2026-05-16] ingest | unified-polish-smoke-20260516-072651
+Verdict: killed. Cost: $0.50. Feedback: "[terminal_verdict=killed]
+
+Exception: RuntimeError: SIGTERM received (signum=15)
+
+Last 30 log lines:"
+
+## [2026-05-16] ingest | unified-polish-smoke2-20260516-083010
+Verdict: killed. Cost: $0.50. Feedback: "[terminal_verdict=killed]
+
+Exception: RuntimeError: SIGTERM received (signum=15)
+
+Last 30 log lines:"
+
+## [2026-05-16] ingest | quiz-wars-bold-20260516-105233
+Verdict: killed. Cost: $0.00. Feedback: "[terminal_verdict=killed]
+
+Exception: RuntimeError: SIGTERM received (signum=15)
+
+Last 30 log lines:"
+
+## [2026-05-16] ingest | quiz-wars-bold-unified-20260516-111715
+Verdict: completed. Cost: $0.50. Winner: Concept 0 (claude-opus, 0 wins). Feedback: "[terminal_verdict=completed]
+
+Last 30 log lines:
+  ⏭ concept-2: skipped (qa_status=failed_max)
+[JUDG"
+
+## [2026-05-16] ingest | quiz-wars-bold-unified-20260516-134441
+Verdict: killed. Cost: $0.00. Feedback: "[terminal_verdict=killed]
+
+Exception: RuntimeError: SIGTERM received (signum=15)
+
+Last 30 log lines:"
+
+## [2026-05-16] ingest | quiz-wars-bold-unified-20260516-134441-v2
+Verdict: completed. Cost: $0.50. Winner: Concept 0 (claude-opus, 0 wins). Feedback: "[terminal_verdict=completed]
+
+Last 30 log lines:
+[JUDGE-LOOP] (unified) Status: 0 above_bar | 0 pend"
+
+## [2026-05-16] ingest | quiz-wars-bold-unified-20260516-135130
+Verdict: killed. Cost: $0.50. Feedback: "[terminal_verdict=killed]
+
+Exception: RuntimeError: SIGTERM received (signum=15)
+
+Last 30 log lines:"
+
+## [2026-05-20] ingest | quiz-wars-bold-unified-20260520-v3
+Verdict: completed. Cost: $4.26. Winner: Concept 0 (claude-opus, 0 wins). Feedback: "[terminal_verdict=completed]
+
+Last 30 log lines:
+  ⏭ concept-2: skipped (qa_status=failed_max)
+[JUDG"
